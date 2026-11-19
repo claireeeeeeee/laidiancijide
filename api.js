@@ -118,7 +118,7 @@ function kingAction(db, st, online, me, action, a) {
       if (!['truth', 'dare', 'quiz'].includes(a.type)) return 'bad_kind';
       q = draw(db, { ...st, truth: { ...truthInit('dice'), takers: targets } }, a.type, '', online);
       if (!q) return 'empty';
-      st.used_q = add(st.used_q, q.id);
+      st.used_q = [q.id, ...(st.used_q || [])].slice(0, 400);
     }
     st.king = { ...k, phase: 'challenge', targets, q, results: {}, show_answer: false };
   } else if (action === 'k_answer') {

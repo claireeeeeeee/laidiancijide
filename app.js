@@ -332,17 +332,18 @@ function truthHTML() {
   return '';
 }
 
+const isKingSelf = k => k && k.king === me();
 function kingHTML() {
   const k = st().king;
   if (!k) return '';
-  const online = onlineIds();
+  const online = inGameIds('king');            // 只算在国王游戏页面的在线玩家（和服务器一致）
   if (k.phase === 'setup') {
-    const options = players().filter(p => p.online).map(p =>
+    const options = players().filter(p => online.includes(p.id)).map(p =>
       `<option value="${esc(p.id)}"${S.kingPlayer === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
     return `<div class="h-cap">国王游戏</div><h1 class="h-title disp">谁来当国王</h1>
       <div class="stack">
         <label class="stack">本轮国王<select id="kingPlayer" class="king-field"><option value="random">随机选人</option>${options}</select></label>
-        <p class="note">至少两位玩家在线。选定编号方式后，由大家确认开局。</p>
+        <p class="note">${online.length < 2 ? '至少 2 个人在这个页面才能开始' : `这个页面现在有 ${online.length} 个人`}</p>
         <button class="btn b1" data-act="k-start" data-mode="secret" ${online.length < 2 ? 'disabled' : ''}>秘密编号</button>
         <button class="btn b3" data-act="k-start" data-mode="public" ${online.length < 2 ? 'disabled' : ''}>公开编号</button>
       </div>`;
@@ -351,10 +352,11 @@ function kingHTML() {
   const myNumber = k.numbers[me()];
   const numbers = k.mode === 'public'
     ? `<div class="chips">${Object.entries(k.numbers).sort((a, b) => a[1] - b[1])
-        .map(([id, n]) => `<span class="chip">${n}号 · ${esc(pname(id))}</span>`).join('')}</div>`
+        .map(([id, n]) => `<span class="chip">${n}号 ${esc(pname(id))}</span>`).join('')}</div>`
     : myNumber ? `<p class="note">只有你能看到自己的编号：${myNumber}号</p>` : '';
-  const head = `<div class="h-cap">国王游戏 · 第 ${k.round} 轮</div>
-    <h1 class="h-title disp">${isKing ? '你是国王' : `${esc(pname(k.king))}是国王`}</h1>${numbers}`;
+  const noNumber = !isKingSelf(k) && !(me() in (k.numbers || {})) ? '<p class="note">这一轮你没有号码，下一轮一起</p>' : '';
+  const head = `<div class="h-cap">国王游戏，第 ${k.round} 轮</div>
+    <h1 class="h-title disp">${isKing ? '你是国王' : `${esc(pname(k.king))}是国王`}</h1>${numbers}${noNumber}`;
   const restart = '<button class="link" data-act="k-restart">重新指定国王</button>';
   if (k.phase === 'command') {
     const draft = S.kingDraft;
@@ -370,13 +372,13 @@ function kingHTML() {
   }
   const myTask = k.targets.includes(me()), q = k.q;
   const task = `<div class="qcard king-controls"><p>${esc(q.text)}</p></div>
-    <div class="chips">${k.targets.map(id => `<span class="chip">${esc(pname(id))} · ${k.results[id] === 'done' ? '已完成' : k.results[id] === 'skip' ? '已跳过' : '等待挑战'}</span>`).join('')}</div>
+    <div class="chips">${k.targets.map(id => `<span class="chip">${esc(pname(id))}：${k.results[id] === 'done' ? '已完成' : k.results[id] === 'skip' ? '已跳过' : '等待挑战'}</span>`).join('')}</div>
     ${k.show_answer && q.answer ? `<div class="answer"><b>答案</b>${esc(q.answer)}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>` : ''}`;
   if (k.phase === 'challenge') {
     return head + task + `<div class="push stack">
       ${!k.show_answer && q.has_answer && (isKing || myTask) ? '<button class="btn b3" data-act="k-answer">看答案</button>' : ''}
       ${myTask && !k.results[me()] ? '<div class="row2"><button class="btn b1" data-act="k-result" data-result="done">完成挑战</button><button class="btn b3" data-act="k-result" data-result="skip">我跳过</button></div>' : ''}
-      <button class="link" data-act="k-skip">提议跳过整道命令</button>${restart}</div>`;
+      <button class="link" data-act="k-skip">跳过这条命令</button>${restart}</div>`;
   }
   const eligible = k.targets.filter(id => k.results[id] === 'done' && online.includes(id));
   const canPick = isKing || (!online.includes(k.king) && Boolean(myNumber));
@@ -903,8 +905,13 @@ async function handle(a, ds = {}, el) {
         el.setAttribute('aria-pressed', String(S.kingDraft.numbers.includes(n)));
         break;
       }
-      case 'k-publish':
-        await act('k_publish', { key: st().king.key, type: ds.type, numbers: S.kingDraft.numbers, text: S.kingDraft.text }); break;
+      case 'k-publish': {
+        const typed = ds.type === 'custom' && !!S.kingDraft.text;
+        const r = await act('k_publish', { key: st().king.key, type: ds.type, numbers: S.kingDraft.numbers, text: S.kingDraft.text });
+        // 打过字：重新加载一次，避免之后摇骰子时 iPhone 弹出「撤销键入」
+        if (typed && r && r.ok !== false) setTimeout(() => cleanEnter(S.code), 400);
+        break;
+      }
       case 'k-answer': await act('k_answer', { key: st().king.key }); break;
       case 'k-result': await act('k_result', { key: st().king.key, result: ds.result }); break;
       case 'k-next': await act('k_next', { key: st().king.key, player: ds.player }); break;

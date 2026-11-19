@@ -374,7 +374,8 @@ begin
       q := public._ldc_draw(st || jsonb_build_object('truth',
         public._ldc_truth_init('dice') || jsonb_build_object('takers', targets)), choice, null, online);
       if q is null then return '{"error":"empty"}'; end if;
-      st := jsonb_set(st, '{used_q}', public._ldc_add(st->'used_q', q->>'id'));
+      st := jsonb_set(st, '{used_q}', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb) from
+              jsonb_array_elements(jsonb_build_array(q->'id') || coalesce(st->'used_q', '[]'::jsonb)) with ordinality z(x, i) where i <= 400));
     else return '{"error":"bad_kind"}';
     end if;
     k := k || jsonb_build_object('phase', 'challenge', 'targets', targets, 'q', q, 'results', '{}'::jsonb, 'show_answer', false);
