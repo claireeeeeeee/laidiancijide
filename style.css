@@ -279,3 +279,8 @@ textarea.king-field{resize:vertical}
 .cand{padding:18px;border-radius:16px;border:1.5px solid var(--line);background:var(--surface);font-size:18px;font-weight:700;text-align:left}
 .cand.on{border-color:var(--a1);border-width:2.5px;background:var(--well)}
 [data-skin="night"] .cand.on{box-shadow:0 0 18px #ff4fa355}
+
+/* ---------- 邀请提示（有人在别的游戏准备好了） ---------- */
+.ask.invite{border-color:var(--a2);position:sticky;top:calc(env(safe-area-inset-top) + 8px);z-index:12;margin-top:8px}
+[data-skin="night"] .ask.invite{box-shadow:0 0 18px #3ee6e044}
+.ask.invite .yes{background:var(--a2);color:var(--on-a2)}

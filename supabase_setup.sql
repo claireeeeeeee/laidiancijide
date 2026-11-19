@@ -5,9 +5,10 @@
 -- 设计：
 --   * 没有房主，所有玩家权限相同。房间只能由网站管理员（带管理员钥匙）创建，创建只是生成房间号。
 --   * 表都开 RLS 且不给策略：网页的匿名 key 不能直接读写表，只能调用下面的 ldc_ 函数。
---   * 规则全部在服务器执行：骰子点数由服务器随机；揭晓前每个人只能看到自己的点数；
---     共同确认（换游戏、继续、跳过某人、重开本轮）由服务器统计：
---       在线的人全部同意就执行；任何一人点「不了」就取消；20 秒内没人反对也执行。
+--   * 规则全部在服务器执行：骰子点数由服务器随机；揭晓前每个人只能看到自己的点数。
+--   * 2026-11-20 起不再投票：每个人自己决定在大厅还是在哪个游戏页面（state.where），
+--     只有「在线、而且在这个游戏页面」的人参与这个游戏；所有操作点了就直接执行，并通知其他人。
+--     有人在某个游戏里准备好 / 开局时写入 state.invite，其他页面的人会看到「去看看」。
 --   * 玩家凭据只存 sha256。
 --   * 一个房间的全部进度存在 ldc_rooms.state（jsonb），改动时整行加锁，避免同时点按钮冲突。
 
@@ -105,6 +106,18 @@ language sql stable as $$
   select coalesce(jsonb_agg(id::text order by seat), '[]'::jsonb)
   from public.ldc_players
   where room_id = p_room and left_at is null and last_seen > now() - interval '20 seconds' $$;
+
+-- 在线、而且当前在某个游戏页面的人
+create or replace function public._ldc_here(st jsonb, online jsonb, g text) returns jsonb
+language sql immutable as $$
+  select coalesce((select jsonb_agg(e) from jsonb_array_elements_text(coalesce(online, '[]'::jsonb)) e
+                   where g is not null and st->'where'->>e = g), '[]'::jsonb) $$;
+
+-- 把在 p_from 页面的人都带到 p_to 页面（摇骰子 ↔ 真心话大冒险 的正常流程）
+create or replace function public._ldc_move(st jsonb, p_from text, p_to text) returns jsonb
+language sql immutable as $$
+  select jsonb_set(st, '{where}', coalesce((select jsonb_object_agg(key, case when value #>> '{}' = p_from then to_jsonb(p_to) else value end)
+                                            from jsonb_each(coalesce(st->'where', '{}'::jsonb))), '{}'::jsonb)) $$;
 
 create or replace function public._ldc_dice_init() returns jsonb
 language sql immutable as $$
@@ -335,7 +348,6 @@ declare
   q jsonb; txt text; next_king text; eligible jsonb; choice text;
 begin
   if st->>'game' is distinct from 'king' or k is null then return '{"error":"no_game"}'; end if;
-  if coalesce((st->>'paused')::boolean, false) then return '{"error":"paused"}'; end if;
   if k->>'key' is null or k->>'key' is distinct from a->>'key' then return '{"error":"phase"}'; end if;
 
   if action = 'k_publish' then
@@ -401,7 +413,7 @@ begin
   return jsonb_build_object('state', jsonb_set(st, '{king}', k));
 end $$;
 
--- 执行一个已通过的提议
+-- 执行一个操作（以前要投票，现在点了就执行）。st->>'game' 是这次操作所属的游戏，online 是在这个游戏页面的在线玩家
 create or replace function public._ldc_apply(st jsonb, p jsonb, online jsonb) returns jsonb
 language plpgsql volatile as $$
 declare k text := p->>'kind'; d jsonb := st->'dice'; t text; tr jsonb := st->'truth'; now_ms bigint := public._ldc_now_ms();
@@ -422,7 +434,7 @@ begin
               where key in ('mode', 'timer', 'scoring', 'scores', 'round', 'history')), '{}'::jsonb));
     end if;
   elsif k = 'resume' then
-    st := (st || '{"paused":false}'::jsonb) - 'paused_by';
+    st := (st || '{"paused":false}'::jsonb) - 'paused_by' - 'paused_game';
     -- 暂停期间计时器停住，继续时接着倒数
     if tr is not null and jsonb_typeof(tr->'timer_left') = 'number' then
       st := jsonb_set(st, '{truth}', tr || jsonb_build_object('timer_end', now_ms + (tr->>'timer_left')::bigint, 'timer_left', null));
@@ -463,31 +475,23 @@ begin
   return st;
 end $$;
 
--- 结算：处理到期 / 全员同意的提议，以及游戏的自动推进
+-- 结算：各个游戏的自动推进（只看在这个游戏页面的在线玩家；暂停的游戏不推进）
 create or replace function public._ldc_settle(st jsonb, online jsonb, p_room uuid) returns jsonb
 language plpgsql volatile as $$
-declare p jsonb := st->'proposal'; d jsonb; all_yes boolean; now_ms bigint := public._ldc_now_ms();
+declare d jsonb; here jsonb; need jsonb; pg text := case when coalesce((st->>'paused')::boolean, false) then st->>'paused_game' end;
 begin
-  if p is not null and jsonb_typeof(p) = 'object' then
-    select not exists (select 1 from jsonb_array_elements_text(online) o
-                       where coalesce((p->'votes'->>o)::boolean, false) = false) into all_yes;
-    if all_yes or now_ms >= (p->>'deadline')::bigint then
-      st := public._ldc_apply(st - 'proposal', p, online);
-      st := st || jsonb_build_object('notice', jsonb_build_object('kind', p->>'kind', 'ok', true, 'by', p->>'by', 'payload', p->'payload', 'at', now_ms));
-      insert into public.ldc_events (room_id, kind, payload) values (p_room, 'proposal_passed', p);
-    end if;
-  end if;
-
-  if coalesce((st->>'paused')::boolean, false) then return st; end if;
-
-  if st->>'game' = 'dice' and st->'dice' is not null then
-    d := st->'dice';
-    if d->>'phase' = 'ready' and jsonb_array_length(online) >= 2 and public._ldc_subset(online, d->'ready') then
-      d := public._ldc_dice_new_round(d, online);
+  if st->'dice' is not null and pg is distinct from 'dice' then
+    d := st->'dice'; here := public._ldc_here(st, online, 'dice');
+    if d->>'phase' = 'ready' and jsonb_array_length(here) >= 2 and public._ldc_subset(here, d->'ready') then
+      d := public._ldc_dice_new_round(d, here);
     elsif d->>'phase' = 'rolling' then
-      if jsonb_array_length(d->'participants') = 0 then
+      -- 还要等的人：本轮参与者里，除了「在线但已经去了别的页面」的人
+      need := (select coalesce(jsonb_agg(e), '[]'::jsonb) from jsonb_array_elements_text(d->'participants') e
+               where not (online ? e) or here ? e);
+      if jsonb_array_length(d->'done') = 0 and jsonb_array_length(need) = 0 then
         d := d || '{"phase":"ready","ready":[]}'::jsonb;
-      elsif public._ldc_subset(d->'participants', d->'done') then
+      elsif jsonb_array_length(d->'done') > 0 and public._ldc_subset(need, d->'done') then
+        d := jsonb_set(d, '{participants}', (select coalesce(jsonb_agg(e), '[]'::jsonb) from jsonb_array_elements_text(d->'participants') e where d->'done' ? e));
         d := public._ldc_dice_reveal(d);
         insert into public.ldc_events (room_id, kind, payload)
           values (p_room, 'dice_reveal', jsonb_build_object('round', d->'round', 'results', d->'results'));
@@ -495,8 +499,8 @@ begin
     end if;
     st := jsonb_set(st, '{dice}', d);
   end if;
-  if st->>'game' = 'bluff' and st->'bluff' is not null then
-    st := public._ldc_bluff_settle(st, online);
+  if st->'bluff' is not null and pg is distinct from 'bluff' then
+    st := public._ldc_bluff_settle(st, public._ldc_here(st, online, 'bluff'));
   end if;
   return st;
 end $$;
@@ -508,7 +512,7 @@ declare r public.ldc_rooms; st jsonb; mine jsonb;
 begin
   select * into r from public.ldc_rooms where id = p_room;
   st := r.state;
-  if st->>'game' = 'dice' and st->'dice' is not null and st->'dice'->>'phase' <> 'reveal' then
+  if st->'dice' is not null and st->'dice'->>'phase' <> 'reveal' then
     mine := st->'dice'->'results'->(p_me::text);
     st := jsonb_set(st, '{dice,results}', case when mine is null then '{}'::jsonb else jsonb_build_object(p_me::text, mine) end);
   end if;
@@ -518,7 +522,7 @@ begin
             || jsonb_build_object('has_answer', (st->'truth'->'q'->>'answer') is not null));
   end if;
   -- 瞎掰王：揭晓前每个人只看到自己的身份；知识题答案只给老实人
-  if st->>'game' = 'bluff' and st->'bluff' is not null and st->'bluff'->>'phase' <> 'reveal' then
+  if st->'bluff' is not null and st->'bluff'->>'phase' <> 'reveal' then
     mine := st->'bluff'->'roles'->(p_me::text);
     st := jsonb_set(st, '{bluff,roles}', case when mine is null then '{}'::jsonb else jsonb_build_object(p_me::text, mine) end);
     if jsonb_typeof(st->'bluff'->'q') = 'object' and (mine is null or mine #>> '{}' <> 'honest') then
@@ -533,7 +537,7 @@ begin
     st := jsonb_set(st, '{king,q}', ((st->'king'->'q') - 'answer' - 'explain')
       || jsonb_build_object('has_answer', coalesce(st->'king'->'q'->>'answer', '') <> ''));
   end if;
-  st := st - 'used_q';
+  st := st - 'used_q' - 'game' - 'proposal';
   return jsonb_build_object(
     'ok', true, 'code', r.code, 'me', p_me::text, 'version', r.version, 'now', public._ldc_now_ms(),
     'players', (select coalesce(jsonb_agg(jsonb_build_object('id', id::text, 'name', nickname, 'seat', seat,
@@ -617,6 +621,7 @@ declare
   r ldc_rooms; v_pid uuid; me text; online jsonb; st jsonb; st0 jsonb; d jsonb;
   err text; res jsonb := '{}'::jsonb; p jsonb; k text; g text; t text; v int; now_ms bigint := _ldc_now_ms();
   a jsonb := coalesce(p_args, '{}'::jsonb); tr jsonb; paused boolean; king_result jsonb; bl jsonb; cur text;
+  all_online jsonb; ag text;
 begin
   select * into r from ldc_rooms where code = p_code for update;
   if not found then return '{"ok":false,"error":"not_found"}'; end if;
@@ -624,24 +629,40 @@ begin
     where room_id = r.id and token_hash = _ldc_hash(p_token) and left_at is null returning id into v_pid;
   if v_pid is null then return '{"ok":false,"error":"not_member"}'; end if;
   me := v_pid::text;
-  online := _ldc_online(r.id);
+  all_online := _ldc_online(r.id);
   st0 := r.state;
-  st := _ldc_settle(r.state, online, r.id);
+  st := _ldc_settle((r.state - 'game' - 'proposal') || jsonb_build_object('where', coalesce(r.state->'where', '{}'::jsonb)), all_online, r.id);
   d := st->'dice';
-  paused := coalesce((st->>'paused')::boolean, false);
+  -- 这次操作属于哪个游戏；参与者 = 在线、而且在这个游戏页面的人
+  ag := case when p_action in ('ready', 'unready', 'roll', 'next_round', 'to_truth') then 'dice'
+             when left(p_action, 2) = 't_' then 'truth' when left(p_action, 2) = 'k_' then 'king' when left(p_action, 2) = 'b_' then 'bluff'
+             when p_action = 'propose' then coalesce(a->'payload'->>'game', st->'where'->>me)
+             when p_action = 'pause' then st->'where'->>me end;
+  online := _ldc_here(st, all_online, ag);
+  st := st || jsonb_build_object('game', ag);
+  paused := coalesce((st->>'paused')::boolean, false) and st->>'paused_game' is not distinct from ag;
 
   if p_action = 'state' then
     null;
 
+  -- 进入某个游戏页面（g = null 回大厅）。不用别人同意
+  elsif p_action = 'goto' then
+    g := a->>'game';
+    if g is not null and g not in ('dice', 'truth', 'king', 'bluff') then err := 'not_ready';
+    else
+      st := jsonb_set(st, '{where}', (st->'where') || jsonb_build_object(me, g));
+      if g = 'dice' and st->'dice' is null then st := jsonb_set(st, '{dice}', _ldc_dice_init()); end if;
+      if g = 'truth' and st->'truth' is null then st := jsonb_set(st, '{truth}', _ldc_truth_init('setup')); end if;
+      if g = 'king' and st->'king' is null then st := jsonb_set(st, '{king}', _ldc_king_setup('secret', 0)); end if;
+      if g = 'bluff' and st->'bluff' is null then st := jsonb_set(st, '{bluff}', _ldc_bluff_init()); end if;
+    end if;
+
+  -- 以前要大家同意的操作，现在点了就执行
   elsif p_action = 'propose' then
     k := a->>'kind';
-    if st->'proposal' is not null and jsonb_typeof(st->'proposal') = 'object' then err := 'busy';
-    elsif k = 'switch_game' then
-      g := a->'payload'->>'game';
-      if g is not null and g not in ('dice', 'truth', 'king', 'bluff') then err := 'not_ready';
-      elsif g is not distinct from st->>'game' then err := 'same'; end if;
+    if ag is null then err := 'no_game';
     elsif k = 'resume' then
-      if not coalesce((st->>'paused')::boolean, false) then err := 'not_paused'; end if;
+      if not paused then err := 'not_paused'; end if;
     elsif k = 'skip_player' then
       t := a->'payload'->>'player';
       if st->>'game' <> 'dice' or d->>'phase' <> 'rolling' or not (d->'participants' ? t) or (d->'done' ? t) or t = me then err := 'bad_target'; end if;
@@ -660,33 +681,26 @@ begin
       elsif k = 'king_redeal' and (not (online ? (st->'king'->>'king')) or jsonb_array_length(online) < 2)
         then err := 'king_offline'; end if;
     elsif k = 'restart_round' then
-      if coalesce(st->>'game', '') not in ('dice', 'truth', 'king', 'bluff') then err := 'no_game'; end if;
+      if st->(st->>'game') is null then err := 'no_game'; end if;
     elsif k in ('bluff_redraw', 'bluff_void') then
       if st->>'game' <> 'bluff' or st->'bluff'->>'phase' not in ('roles', 'speak', 'ask', 'guess')
          or (k = 'bluff_redraw' and st->'bluff'->>'phase' = 'guess') then err := 'phase'; end if;
     else err := 'bad_kind';
     end if;
     if err is null then
-      p := jsonb_build_object('id', substr(md5(random()::text), 1, 8), 'kind', k, 'payload', coalesce(a->'payload', '{}'::jsonb),
-                              'by', me, 'votes', jsonb_build_object(me, true), 'deadline', now_ms + 20000, 'at', now_ms);
-      st := st || jsonb_build_object('proposal', p);
-      insert into ldc_events (room_id, player_id, kind, payload) values (r.id, v_pid, 'propose', p);
-    end if;
-
-  elsif p_action = 'vote' then
-    p := st->'proposal';
-    if p is null or jsonb_typeof(p) <> 'object' or p->>'id' <> a->>'id' then err := 'stale';
-    elsif coalesce((a->>'yes')::boolean, false) then
-      st := jsonb_set(st, '{proposal,votes}', (p->'votes') || jsonb_build_object(me, true));
-    else
-      st := (st - 'proposal') || jsonb_build_object('notice', jsonb_build_object('kind', p->>'kind', 'ok', false, 'by', me, 'payload', p->'payload', 'at', now_ms));
-      insert into ldc_events (room_id, player_id, kind, payload) values (r.id, v_pid, 'proposal_rejected', p);
+      p := jsonb_build_object('kind', k, 'payload', coalesce(a->'payload', '{}'::jsonb) || jsonb_build_object('game', ag), 'by', me);
+      st := _ldc_apply(st, p, online);
+      st := st || jsonb_build_object('notice', jsonb_build_object('kind', k, 'ok', true, 'by', me, 'payload', p->'payload', 'at', now_ms));
+      if k = 'king_start' then
+        st := st || jsonb_build_object('invite', jsonb_build_object('game', 'king', 'by', me, 'what', 'start', 'at', now_ms));
+      end if;
+      insert into ldc_events (room_id, player_id, kind, payload) values (r.id, v_pid, 'act', p);
     end if;
 
   elsif p_action = 'pause' then
-    if st->>'game' is null then err := 'no_game';
+    if ag is null then err := 'no_game';
     elsif not coalesce((st->>'paused')::boolean, false) then
-      st := st || jsonb_build_object('paused', true, 'paused_by', me, 'notice', jsonb_build_object('kind','pause','ok',true,'by',me,'at',now_ms));
+      st := st || jsonb_build_object('paused', true, 'paused_by', me, 'paused_game', ag, 'notice', jsonb_build_object('kind','pause','ok',true,'by',me,'at',now_ms,'payload',jsonb_build_object('game',ag)));
       tr := st->'truth';
       if tr is not null and jsonb_typeof(tr->'timer_end') = 'number' then
         st := jsonb_set(st, '{truth}', tr || jsonb_build_object('timer_left', greatest((tr->>'timer_end')::bigint - now_ms, 0), 'timer_end', null));
@@ -703,10 +717,14 @@ begin
     if err is null then st := king_result->'state'; end if;
 
   elsif p_action in ('ready', 'unready', 'roll', 'next_round') then
-    if st->>'game' <> 'dice' or d is null then err := 'no_game';
-    elsif coalesce((st->>'paused')::boolean, false) then err := 'paused';
+    if d is null then err := 'no_game';
+    elsif paused then err := 'paused';
     elsif p_action = 'ready' then
-      if d->>'phase' <> 'ready' then err := 'phase'; else d := jsonb_set(d, '{ready}', _ldc_add(d->'ready', me)); end if;
+      if d->>'phase' <> 'ready' then err := 'phase';
+      else
+        d := jsonb_set(d, '{ready}', _ldc_add(d->'ready', me));
+        st := st || jsonb_build_object('invite', jsonb_build_object('game', 'dice', 'by', me, 'what', 'ready', 'at', now_ms));
+      end if;
     elsif p_action = 'unready' then
       if d->>'phase' <> 'ready' then err := 'phase'; else d := jsonb_set(d, '{ready}', _ldc_del(d->'ready', me)); end if;
     elsif p_action = 'roll' then
@@ -724,13 +742,14 @@ begin
     end if;
     if err is null then st := jsonb_set(st, '{dice}', d); end if;
 
-  -- 摇骰子揭晓后直接去出题（正常流程，不用投票）
+  -- 摇骰子揭晓后直接去出题：在摇骰子页面的人一起去真心话大冒险
   elsif p_action = 'to_truth' then
     if st->>'game' <> 'dice' or d is null or d->>'phase' <> 'reveal' or coalesce((d->>'all_same')::boolean, false) then err := 'phase';
     elsif paused then err := 'paused';
     else
       st := st || jsonb_build_object('game', 'truth', 'truth', _ldc_truth_init('dice') || jsonb_build_object(
         'askers', d->'askers', 'takers', d->'takers', 'round', d->'round', 'timer', coalesce((st->'truth'->>'timer')::int, 0)));
+      st := _ldc_move(st, 'dice', 'truth');
     end if;
 
   elsif left(p_action, 2) = 't_' then
@@ -744,6 +763,7 @@ begin
       else
         tr := tr || jsonb_build_object('mode', a->>'mode', 'order_kind', coalesce(a->>'order', 'seat'), 'turn', 0, 'lap', 1, 'phase', 'choose',
               'order', case when a->>'order' = 'random' then _ldc_shuffle(online) else online end);
+        st := st || jsonb_build_object('invite', jsonb_build_object('game', 'truth', 'by', me, 'what', 'start', 'at', now_ms));
       end if;
 
     elsif p_action = 't_draw' then
@@ -805,6 +825,7 @@ begin
       if tr->>'mode' <> 'dice' then err := 'phase';
       else
         st := st || jsonb_build_object('game', 'dice', 'dice', _ldc_dice_new_round(coalesce(st->'dice', _ldc_dice_init()), online));
+        st := _ldc_move(st, 'truth', 'dice');
       end if;
 
     else err := 'bad_action';
@@ -836,7 +857,9 @@ begin
     elsif p_action in ('b_start', 'b_next_round') then
       if (p_action = 'b_start' and bl->>'phase' <> 'setup') or (p_action = 'b_next_round' and bl->>'phase' <> 'reveal') then err := 'phase';
       elsif jsonb_array_length(online) < 3 then err := 'need3';
-      else bl := _ldc_bluff_recruit(bl, online);
+      else
+        bl := _ldc_bluff_recruit(bl, online);
+        st := st || jsonb_build_object('invite', jsonb_build_object('game', 'bluff', 'by', me, 'what', 'start', 'at', now_ms));
       end if;
 
     elsif p_action = 'b_want' then
@@ -892,7 +915,7 @@ begin
     err := 'bad_action';
   end if;
 
-  st := _ldc_settle(st, online, r.id);
+  st := _ldc_settle(st - 'game', all_online, r.id);
   if st is distinct from st0 then
     update ldc_rooms set state = st, version = version + 1, updated_at = now() where id = r.id;
   end if;
@@ -928,7 +951,8 @@ begin
   if v_pid is null then return '{"ok":true}'; end if;
   -- 摇骰时离开且还没摇：从本轮移除，避免卡住其他人
   st := r.state; d := st->'dice';
-  if st->>'game' = 'dice' and d is not null then
+  st := jsonb_set(st, '{where}', coalesce(st->'where', '{}'::jsonb) - v_pid::text);
+  if d is not null then
     d := jsonb_set(d, '{ready}', _ldc_del(d->'ready', v_pid::text));
     if d->>'phase' = 'rolling' and not (d->'done' ? v_pid::text) then
       d := jsonb_set(d, '{participants}', _ldc_del(d->'participants', v_pid::text));
@@ -947,7 +971,7 @@ revoke all on function public._ldc_hash(text), public._ldc_now_ms(), public._ldc
   public._ldc_is_admin(text), public._ldc_truth_init(text), public._ldc_pick(jsonb), public._ldc_shuffle(jsonb), public._ldc_minus(jsonb,jsonb),
   public._ldc_t_doers(jsonb), public._ldc_t_can(jsonb,jsonb,text,text), public._ldc_draw(jsonb,text,text,jsonb),
   public._ldc_bluff_init(), public._ldc_bluff_recruit(jsonb,jsonb), public._ldc_bluff_assign(jsonb), public._ldc_bluff_draw(jsonb),
-  public._ldc_bluff_finish(jsonb,text,boolean), public._ldc_bluff_settle(jsonb,jsonb)
+  public._ldc_bluff_finish(jsonb,text,boolean), public._ldc_bluff_settle(jsonb,jsonb), public._ldc_here(jsonb,jsonb,text), public._ldc_move(jsonb,text,text)
   from public, anon, authenticated;
 revoke all on function public._ldc_king_setup(text,int), public._ldc_king_round(jsonb,text,jsonb,boolean),
   public._ldc_king_clear(jsonb), public._ldc_king_action(jsonb,jsonb,text,text,jsonb) from public, anon, authenticated;

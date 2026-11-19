@@ -63,6 +63,9 @@ const pname = id => { const p = players().find(x => x.id === id); return p ? p.n
 const names = ids => ids.map(pname).join('、');
 const onlineIds = () => players().filter(p => p.online).map(p => p.id);
 const serverNow = () => Date.now() + S.offset;
+// 我现在在哪个游戏页面（null = 大厅）。每个人各走各的
+const myGame = () => ((st().where || {})[me()]) || null;
+const inGameIds = g => players().filter(p => p.online && (st().where || {})[p.id] === g).map(p => p.id);
 // 打过字之后重新加载一次页面再进房间：清掉 iPhone「摇动以撤销」的撤销记录，摇骰子时就不会弹「撤销键入」
 function cleanEnter(code) {
   const u = new URL(location.href); u.hash = '';
@@ -160,6 +163,14 @@ function proposalHTML() {
     : voted ? '' : `<button class="yes" data-act="vote" data-id="${p.id}" data-yes="1">同意</button><button class="no" data-act="vote" data-id="${p.id}" data-yes="0">不了</button>`;
   return `<div class="ask" role="alert"><p>${mine ? '你' : esc(pname(p.by))}${what}<span>${yes}/${on.length}，<span data-countdown="${p.deadline}">${sec}</span> 秒</span></p>${btns}</div>`;
 }
+// 有人在别的游戏里准备好 / 开局：提示不在那个页面的人「去看看」
+function inviteHTML() {
+  const inv = st().invite;
+  if (!inv || inv.by === me() || inv.game === myGame() || (S.inviteSeen || 0) >= inv.at || serverNow() - inv.at > 90000) return '';
+  const what = inv.what === 'ready' ? '准备好了' : '开局了';
+  return `<div class="ask invite" role="alert"><p>${esc(pname(inv.by))}在${gameName(inv.game)}${what}</p>
+    <button class="yes" data-act="goto" data-game="${inv.game}">去看看</button><button class="no" data-act="invite-dismiss" data-at="${inv.at}">忽略</button></div>`;
+}
 function peopleHTML() {
   return `<div class="people">${players().map(p => `<span class="p ${p.online ? '' : 'off'} ${p.id === me() ? 'me' : ''}">
     <i class="av${p.seat % 3}">${esc([...p.name][0] || '?')}</i>${esc(p.name)}${p.id === me() ? '<em>我</em>' : ''}</span>`).join('')}</div>`;
@@ -173,7 +184,8 @@ function lobbyHTML() {
     <div class="push"></div>
     <div class="games">${GAMES.map(g => {
       const ready = A.GAMES_READY.includes(g.id);
-      return `<button class="g ${ready ? '' : 'soon'}" data-act="pick" data-game="${g.id}"><span class="k ${g.hl}">${g.k}</span><h3>${g.name}${ready ? '' : '<small>下一版</small>'}</h3></button>`;
+      const n = inGameIds(g.id).length;
+      return `<button class="g ${ready ? '' : 'soon'}" data-act="goto" data-game="${g.id}"><span class="k ${g.hl}">${g.k}</span><h3>${g.name}${!ready ? '<small>下一版</small>' : n ? `<small>${n} 人在玩</small>` : ''}</h3></button>`;
     }).join('')}</div>
     <div class="foot"><button class="link" data-act="rename">改名字</button><button class="link" data-act="leave">离开房间</button></div>`;
 }
@@ -512,23 +524,25 @@ function bluffHTML() {
 
 function roomHTML() {
   const s = st();
-  const inGame = !!s.game;
-  const body = !inGame ? lobbyHTML() : s.game === 'dice' ? diceHTML() : s.game === 'truth' ? truthHTML() : s.game === 'king' ? kingHTML() : s.game === 'bluff' ? bluffHTML() : '';
+  const g = myGame(), inGame = !!g;
+  const pausedHere = !!s.paused && s.paused_game === g && inGame;
+  const body = !inGame ? lobbyHTML() : g === 'dice' ? diceHTML() : g === 'truth' ? truthHTML() : g === 'king' ? kingHTML() : g === 'bluff' ? bluffHTML() : '';
   return `
   <div class="topbar">
     ${inGame ? '<button class="icon-btn" data-act="back-lobby">‹ 大厅</button>' : `<span class="st" style="font-size:13px;color:var(--muted)">${players().filter(p => p.online).length} 人在线</span>`}
     <div class="grow"></div>
-    ${inGame && !s.paused ? '<button class="icon-btn" data-act="pause">暂停</button>' : ''}
+    ${inGame && !pausedHere ? '<button class="icon-btn" data-act="pause">暂停</button>' : ''}
     ${inGame ? '<button class="icon-btn" data-act="share">邀请</button>' : ''}
     ${skinBtn()}
   </div>
   ${S.offline ? '<div class="offline-bar">网络断了，正在重连…</div>' : ''}
-  ${s.paused ? '' : proposalHTML()}
+  ${inviteHTML()}
   <main class="screen">${body}</main>
-  ${s.paused ? `<div class="paused"><div class="card">
+  ${pausedHere ? `<div class="paused"><div class="card">
       <h2 class="disp">暂停中</h2>
       <p class="note" style="margin:0">${esc(pname(s.paused_by))}暂停了</p>
-      ${proposalHTML() || '<button class="btn b1" data-act="resume">继续</button>'}
+      <button class="btn b1" data-act="resume">继续</button>
+      <button class="link" data-act="back-lobby">回大厅</button>
     </div></div>` : ''}
   ${motionModalHTML()}`;
 }
@@ -598,25 +612,25 @@ function setData(d) {
   if (S.kingDraft.key !== kingKey) S.kingDraft = { key: kingKey, text: '', numbers: [] };
   const n = d.state && d.state.notice;
   if (n && n.at !== S.lastNotice) {
-    if (!first && S.lastNotice !== null) toast(noticeText(n));
+    const mine = !n.payload || !n.payload.game || n.payload.game === ((d.state.where || {})[d.me] || null);
+    if (!first && S.lastNotice !== null && mine && n.by !== d.me) toast(noticeText(n));
     S.lastNotice = n.at;
   } else if (first) S.lastNotice = n ? n.at : 0;
   if (sig !== S.sig || S.view !== 'room') { S.sig = sig; S.view = 'room'; render(); }
   return true;
 }
 function noticeText(n) {
-  const by = n.by === me() ? '你' : pname(n.by);
+  const by = n.by === me() ? '你' : pname(n.by), g = n.payload && n.payload.game;
   switch (n.kind) {
-    case 'king_start': return n.ok ? '国王游戏开始' : '开局提议取消';
-    case 'king_redeal': return n.ok ? '重新发编号' : '发编号提议取消';
-    case 'king_skip': return n.ok ? '跳过当前命令' : '跳过提议取消';
-    case 'switch_game': return n.ok ? (n.payload && n.payload.game ? `开始${gameName(n.payload.game)}` : '回到大厅了') : `${by}不同意，继续现在的`;
+    case 'king_start': return `${by}开始了国王游戏`;
+    case 'king_redeal': return `${by}重新发了编号`;
+    case 'king_skip': return `${by}跳过了这条命令`;
     case 'pause': return `${by}暂停了游戏`;
-    case 'resume': return n.ok ? '继续游戏' : `${by}还不想继续`;
-    case 'skip_player': return n.ok ? `这轮跳过了${pname(n.payload && n.payload.player)}` : `${by}不同意跳过`;
-    case 'bluff_redraw': return n.ok ? '换题了，重新看身份' : `${by}不同意换题`;
-    case 'bluff_void': return n.ok ? '这轮作废，不计分' : `${by}不同意作废`;
-    case 'restart_round': return n.ok ? (st().game === 'truth' ? '重新选玩法' : st().game === 'bluff' ? '回到设置' : '这一轮重开了') : `${by}不同意`;
+    case 'resume': return `${by}继续了游戏`;
+    case 'skip_player': return `${by}跳过了${pname(n.payload && n.payload.player)}`;
+    case 'bluff_redraw': return `${by}换了题，重新看身份`;
+    case 'bluff_void': return `${by}让这轮作废了，不计分`;
+    case 'restart_round': return g === 'truth' ? `${by}换了玩法` : g === 'bluff' ? `${by}回到了设置` : `${by}重开了这一轮`;
     default: return '';
   }
 }
@@ -770,7 +784,7 @@ document.addEventListener('click', () => { if (S.motion === 'again') askMotion(t
 // 第一次用：进入摇骰子时弹窗，点「允许」之前点不到后面的按钮
 function motionModalHTML() {
   const s0 = st(), d = s0.dice || {};
-  if (S.motion !== 'ask' || s0.game !== 'dice' || s0.paused || !['ready', 'rolling'].includes(d.phase)) return '';
+  if (S.motion !== 'ask' || myGame() !== 'dice' || (s0.paused && s0.paused_game === 'dice') || !['ready', 'rolling'].includes(d.phase)) return '';
   return `<div class="modal-bg" role="dialog" aria-modal="true" aria-labelledby="mTitle"><div class="modal">
     <div class="modal-icon" aria-hidden="true">${dieHTML(5, 'mini').replace('id="die"', '')}</div>
     <h2 id="mTitle" class="disp">开启摇一摇</h2>
@@ -847,11 +861,17 @@ async function handle(a, ds = {}, el) {
       case 'copy-link': toast(await copy(roomLink(S.code)) ? '链接已复制' : '复制不了，长按地址自己复制'); break;
       case 'share': S.sheet = { type: 'share' }; renderOverlay(); break;
       case 'close': case 'close-bg': S.sheet = null; renderOverlay(); break;
+      case 'goto': {
+        if (!A.GAMES_READY.includes(ds.game)) { toast(ERR.not_ready); break; }
+        S.inviteSeen = Math.max(S.inviteSeen || 0, (st().invite || {}).at || 0);
+        await act('goto', { game: ds.game }); break;
+      }
+      case 'invite-dismiss': S.inviteSeen = +ds.at; S.sig = ''; render(); break;
       case 'pick': {
         if (!A.GAMES_READY.includes(ds.game)) { toast(ERR.not_ready); break; }
-        await act('propose', { kind: 'switch_game', payload: { game: ds.game } }); break;
+        await act('goto', { game: ds.game }); break;
       }
-      case 'back-lobby': await act('propose', { kind: 'switch_game', payload: { game: null } }); break;
+      case 'back-lobby': await act('goto', { game: null }); break;
       case 'vote': await act('vote', { id: ds.id, yes: ds.yes === '1' }); break;
       case 'pause': await act('pause'); break;
       case 'resume': await act('propose', { kind: 'resume' }); break;

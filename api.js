@@ -99,7 +99,6 @@ function kingRound(k, king, online, advance = true) {
 function kingAction(db, st, online, me, action, a) {
   const k = st.king;
   if (st.game !== 'king' || !k) return 'no_game';
-  if (st.paused) return 'paused';
   if (!k.key || a.key !== k.key) return 'phase';
 
   if (action === 'k_publish') {
@@ -241,35 +240,32 @@ function applyProposal(st, p, online) {
   }
   return st;
 }
+// 在线、而且当前在某个游戏页面的人（对照 SQL 的 _ldc_here）
+const here = (st, online, g) => g ? online.filter(x => (st.where || {})[x] === g) : [];
+// 把在 from 页面的人都带到 to 页面（对照 _ldc_move）
+function moveWhere(st, from, to) { const w = { ...(st.where || {}) }; Object.keys(w).forEach(k => { if (w[k] === from) w[k] = to; }); st.where = w; }
+// 各个游戏的自动推进：只看在这个游戏页面的在线玩家；暂停的游戏不推进
 function settle(st, online) {
-  st = clone(st);
-  const p = st.proposal;
-  if (p && typeof p === 'object') {
-    const allYes = online.every(o => p.votes[o] === true);
-    if (allYes || Date.now() >= p.deadline) {
-      delete st.proposal;
-      st = applyProposal(st, p, online);
-      st.notice = { kind: p.kind, ok: true, by: p.by, payload: p.payload, at: Date.now() };
-    }
-  }
-  if (st.paused) return st;
-  if (st.game === 'dice' && st.dice) {
-    let d = st.dice;
-    if (d.phase === 'ready' && online.length >= 2 && subset(online, d.ready)) d = diceNewRound(d, online);
+  st = clone(st); delete st.proposal; delete st.game; st.where = st.where || {};
+  const pg = st.paused ? st.paused_game : null;
+  if (st.dice && pg !== 'dice') {
+    let d = st.dice; const h = here(st, online, 'dice');
+    if (d.phase === 'ready' && h.length >= 2 && subset(h, d.ready)) d = diceNewRound(d, h);
     else if (d.phase === 'rolling') {
-      if (d.participants.length === 0) d = { ...d, phase: 'ready', ready: [] };
-      else if (subset(d.participants, d.done)) d = diceReveal(d);
+      const need = d.participants.filter(x => !online.includes(x) || h.includes(x));   // 去了别的页面的人不再等
+      if (!d.done.length && !need.length) d = { ...d, phase: 'ready', ready: [] };
+      else if (d.done.length && subset(need, d.done)) d = diceReveal({ ...d, participants: d.participants.filter(x => d.done.includes(x)) });
     }
     st.dice = d;
   }
-  if (st.game === 'bluff' && st.bluff) st = bluffSettle(st, online);
+  if (st.bluff && pg !== 'bluff') st = bluffSettle(st, here(st, online, 'bluff'));
   return st;
 }
 const roomPlayers = (db, room) => db.players.filter(p => p.room_id === room.id).sort((a, b) => a.seat - b.seat);
 const onlineIds = (db, room) => roomPlayers(db, room).filter(p => !p.left_at && Date.now() - p.last_seen < ONLINE_MS).map(p => p.id);
 function view(db, room, me) {
   let st = clone(room.state);
-  if (st.game === 'dice' && st.dice && st.dice.phase !== 'reveal') {
+  if (st.dice && st.dice.phase !== 'reveal') {
     const mine = st.dice.results[me];
     st.dice.results = mine == null ? {} : { [me]: mine };
   }
@@ -286,12 +282,12 @@ function view(db, room, me) {
     delete k.q.answer;
     delete k.q.explain;
   }
-  if (st.game === 'bluff' && st.bluff && st.bluff.phase !== 'reveal') {
+  if (st.bluff && st.bluff.phase !== 'reveal') {
     const mine = st.bluff.roles[me];
     st.bluff.roles = mine == null ? {} : { [me]: mine };
     if (st.bluff.q && mine !== 'honest') { const q = { ...st.bluff.q }; delete q.answer; delete q.explain; st.bluff.q = q; }
   }
-  delete st.used_q;
+  delete st.used_q; delete st.game; delete st.proposal;
   return {
     ok: true, code: room.code, me, version: room.version, now: Date.now(),
     players: roomPlayers(db, room).filter(p => !p.left_at).map(p => ({ id: p.id, name: p.nickname, seat: p.seat, online: Date.now() - p.last_seen < ONLINE_MS })),
@@ -348,58 +344,78 @@ const mock = {
     const meP = db.players.find(x => x.room_id === room.id && x.token_hash === token && !x.left_at);
     if (!meP) return { ok: false, error: 'not_member' };
     meP.last_seen = Date.now();
-    const me = meP.id, online = onlineIds(db, room), now = Date.now();
-    let st = settle(room.state, online), d = st.dice, err = null, res = {};
+    const me = meP.id, allOnline = onlineIds(db, room), now = Date.now();
+    let st = settle(room.state, allOnline), d = st.dice, err = null, res = {};
+    // 这次操作属于哪个游戏；参与者 = 在线、而且在这个游戏页面的人
+    const ag = ['ready', 'unready', 'roll', 'next_round', 'to_truth'].includes(action) ? 'dice'
+      : action.startsWith('t_') ? 'truth' : action.startsWith('k_') ? 'king' : action.startsWith('b_') ? 'bluff'
+      : action === 'propose' ? ((a.payload && a.payload.game) || st.where[me] || null)
+      : action === 'pause' ? (st.where[me] || null) : null;
+    const online = here(st, allOnline, ag);
+    const paused = !!st.paused && st.paused_game === ag;
+    st.game = ag;
 
     if (action === 'state') { /* 只刷新 */ }
+    else if (action === 'goto') {
+      // 进入某个游戏页面（null = 回大厅），不用别人同意
+      const g = a.game ?? null;
+      if (g !== null && !GAMES_READY.includes(g)) err = 'not_ready';
+      else {
+        st.where = { ...st.where, [me]: g };
+        if (g === 'dice' && !st.dice) st.dice = diceInit();
+        if (g === 'truth' && !st.truth) st.truth = truthInit('setup');
+        if (g === 'king' && !st.king) st.king = kingSetup();
+        if (g === 'bluff' && !st.bluff) st.bluff = bluffInit();
+      }
+    }
     else if (action === 'propose') {
+      // 以前要大家同意的操作，现在点了就执行
       const k = a.kind;
-      if (st.proposal && typeof st.proposal === 'object') err = 'busy';
-      else if (k === 'switch_game') {
-        const g = a.payload?.game ?? null;
-        if (g !== null && !GAMES_READY.includes(g)) err = 'not_ready';
-        else if (g === (st.game ?? null)) err = 'same';
-      } else if (k === 'resume') { if (!st.paused) err = 'not_paused'; }
+      if (!ag) err = 'no_game';
+      else if (k === 'resume') { if (!paused) err = 'not_paused'; }
       else if (k === 'skip_player') {
         const t = a.payload?.player;
         if (st.game !== 'dice' || d?.phase !== 'rolling' || !d.participants.includes(t) || d.done.includes(t) || t === me) err = 'bad_target';
       } else if (k === 'king_start') {
         const { mode, player } = a.payload || {};
         if (st.game !== 'king' || st.king.phase !== 'setup') err = 'phase';
-        else if (st.paused) err = 'paused';
+        else if (paused) err = 'paused';
         else if (online.length < 2) err = 'king_people';
         else if (!['public', 'secret'].includes(mode) || (player !== 'random' && !online.includes(player))) err = 'bad_target';
       } else if (k === 'king_redeal' || k === 'king_skip') {
         const king = st.king;
         if (st.game !== 'king' || !king || king.key !== a.payload?.key ||
             king.phase !== (k === 'king_redeal' ? 'command' : 'challenge')) err = 'phase';
-        else if (st.paused) err = 'paused';
+        else if (paused) err = 'paused';
         else if (k === 'king_redeal' && (!online.includes(king.king) || online.length < 2)) err = 'king_offline';
-      } else if (k === 'restart_round') { if (!['dice', 'truth', 'king', 'bluff'].includes(st.game)) err = 'no_game'; }
+      } else if (k === 'restart_round') { if (!st[st.game]) err = 'no_game'; }
       else if (k === 'bluff_redraw' || k === 'bluff_void') {
         const ph = st.bluff && st.bluff.phase;
         if (st.game !== 'bluff' || !['roles', 'speak', 'ask', 'guess'].includes(ph) || (k === 'bluff_redraw' && ph === 'guess')) err = 'phase';
       }
       else err = 'bad_kind';
-      if (!err) st.proposal = { id: rid(4), kind: k, payload: a.payload || {}, by: me, votes: { [me]: true }, deadline: now + VOTE_MS, at: now };
-    } else if (action === 'vote') {
-      const p = st.proposal;
-      if (!p || p.id !== a.id) err = 'stale';
-      else if (a.yes) p.votes[me] = true;
-      else { delete st.proposal; st.notice = { kind: p.kind, ok: false, by: me, payload: p.payload, at: now }; }
+      if (!err) {
+        const p = { kind: k, payload: { ...(a.payload || {}), game: ag }, by: me };
+        st = applyProposal(st, p, online);
+        st.notice = { kind: k, ok: true, by: me, payload: p.payload, at: now };
+        if (k === 'king_start') st.invite = { game: 'king', by: me, what: 'start', at: now };
+      }
     } else if (action === 'pause') {
-      if (!st.game) err = 'no_game';
+      if (!ag) err = 'no_game';
       else if (!st.paused) {
-        st.paused = true; st.paused_by = me; st.notice = { kind: 'pause', ok: true, by: me, at: now };
+        st.paused = true; st.paused_by = me; st.paused_game = ag; st.notice = { kind: 'pause', ok: true, by: me, at: now, payload: { game: ag } };
         if (st.truth && typeof st.truth.timer_end === 'number') { st.truth.timer_left = Math.max(st.truth.timer_end - now, 0); st.truth.timer_end = null; }
         if (st.bluff && typeof st.bluff.timer_end === 'number') { st.bluff.timer_left = Math.max(st.bluff.timer_end - now, 0); st.bluff.timer_end = null; }
       }
     } else if (typeof action === 'string' && action.startsWith('k_')) {
-      err = kingAction(db, st, online, me, action, a);
+      err = paused ? 'paused' : kingAction(db, st, online, me, action, a);
     } else if (['ready', 'unready', 'roll', 'next_round'].includes(action)) {
-      if (st.game !== 'dice' || !d) err = 'no_game';
-      else if (st.paused) err = 'paused';
-      else if (action === 'ready') { if (d.phase !== 'ready') err = 'phase'; else d.ready = add(d.ready, me); }
+      if (!d) err = 'no_game';
+      else if (paused) err = 'paused';
+      else if (action === 'ready') {
+        if (d.phase !== 'ready') err = 'phase';
+        else { d.ready = add(d.ready, me); st.invite = { game: 'dice', by: me, what: 'ready', at: now }; }
+      }
       else if (action === 'unready') { if (d.phase !== 'ready') err = 'phase'; else d.ready = del(d.ready, me); }
       else if (action === 'roll') {
         if (d.phase !== 'rolling') err = 'phase';
@@ -408,17 +424,20 @@ const mock = {
         else { const v = 1 + Math.floor(Math.random() * 6); d.results[me] = v; d.done = add(d.done, me); res = { value: v }; }
       } else if (action === 'next_round') { if (d.phase !== 'reveal') err = 'phase'; else st.dice = diceNewRound(d, online); }
     } else if (action === 'to_truth') {
-      if (st.game !== 'dice' || !d || d.phase !== 'reveal' || d.all_same) err = 'phase';
-      else if (st.paused) err = 'paused';
-      else { st.game = 'truth'; st.truth = { ...truthInit('dice'), askers: d.askers, takers: d.takers, round: d.round, timer: (st.truth && st.truth.timer) || 0 }; }
+      if (!d || d.phase !== 'reveal' || d.all_same) err = 'phase';
+      else if (paused) err = 'paused';
+      else { st.game = 'truth'; st.truth = { ...truthInit('dice'), askers: d.askers, takers: d.takers, round: d.round, timer: (st.truth && st.truth.timer) || 0 }; moveWhere(st, 'dice', 'truth'); }
     } else if (action.startsWith('t_')) {
       const t = st.truth;
-      if (st.game !== 'truth' || !t) err = 'no_game';
-      else if (st.paused) err = 'paused';
+      if (!t) err = 'no_game';
+      else if (paused) err = 'paused';
       else if (action === 't_start') {
         if (t.phase !== 'setup') err = 'phase';
         else if (!['free', 'turns'].includes(a.mode)) err = 'bad_action';
-        else Object.assign(t, { mode: a.mode, order_kind: a.order || 'seat', turn: 0, lap: 1, phase: 'choose', order: a.order === 'random' ? shuffle(online) : online.slice() });
+        else {
+          Object.assign(t, { mode: a.mode, order_kind: a.order || 'seat', turn: 0, lap: 1, phase: 'choose', order: a.order === 'random' ? shuffle(online) : online.slice() });
+          st.invite = { game: 'truth', by: me, what: 'start', at: now };
+        }
       } else if (action === 't_draw') {
         if (!['choose', 'question'].includes(t.phase)) err = 'phase';
         else if (!['truth', 'dare', 'quiz'].includes(a.type)) err = 'bad_action';
@@ -457,12 +476,12 @@ const mock = {
         }
       } else if (action === 't_back_dice') {
         if (t.mode !== 'dice') err = 'phase';
-        else { st.game = 'dice'; st.dice = diceNewRound(st.dice || diceInit(), online); }
+        else { st.game = 'dice'; st.dice = diceNewRound(st.dice || diceInit(), online); moveWhere(st, 'truth', 'dice'); }
       } else err = 'bad_action';
     } else if (action.startsWith('b_')) {
       let b = st.bluff;
-      if (st.game !== 'bluff' || !b) err = 'no_game';
-      else if (st.paused) err = 'paused';
+      if (!b) err = 'no_game';
+      else if (paused) err = 'paused';
       else if (action === 'b_setup') {
         if (b.phase !== 'setup') err = 'phase';
         else {
@@ -476,7 +495,7 @@ const mock = {
       } else if (action === 'b_start' || action === 'b_next_round') {
         if ((action === 'b_start' && b.phase !== 'setup') || (action === 'b_next_round' && b.phase !== 'reveal')) err = 'phase';
         else if (online.length < 3) err = 'need3';
-        else b = bluffRecruit(b, online);
+        else { b = bluffRecruit(b, online); st.invite = { game: 'bluff', by: me, what: 'start', at: now }; }
       } else if (action === 'b_want') {
         if (b.phase !== 'recruit') err = 'phase';
         else if (!b.players.includes(me)) err = 'not_in_round';
@@ -508,7 +527,7 @@ const mock = {
       if (!err) st.bluff = b;
     } else err = 'bad_action';
 
-    st = settle(st, online);
+    st = settle(st, allOnline);
     commit(db, room, st);
     const out = { ...view(db, room, me), ...res };
     return err ? { ...out, ok: false, error: err } : out;
@@ -529,7 +548,8 @@ const mock = {
     if (!p) return { ok: true };
     p.left_at = Date.now();
     let st = clone(room.state);
-    if (st.game === 'dice' && st.dice) {
+    if (st.where) { st.where = { ...st.where }; delete st.where[p.id]; }
+    if (st.dice) {
       st.dice.ready = del(st.dice.ready, p.id);
       if (st.dice.phase === 'rolling' && !st.dice.done.includes(p.id)) st.dice.participants = del(st.dice.participants, p.id);
       st = settle(st, onlineIds(db, room));
