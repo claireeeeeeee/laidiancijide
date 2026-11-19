@@ -250,3 +250,32 @@ body.kb .sheet-bg{height:var(--vvh,100%);bottom:auto;top:0}
 .modal-icon{margin-bottom:4px}
 .die.mini{--s:64px;gap:2px;box-shadow:none}
 .perm,.perm-ok{display:none}
+
+.king-controls{margin-top:14px}
+.king-field{width:100%;padding:10px 12px;background:var(--surface-solid);color:var(--ink);border:1px solid var(--line);border-radius:12px;font:inherit}
+textarea.king-field{resize:vertical}
+
+/* ---------- 瞎掰王 ---------- */
+.bmodes{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.bmodes .type{display:grid;gap:4px;padding:18px 8px}
+.bmodes .type small{font-size:12px;color:var(--muted);font-family:"Noto Sans SC",sans-serif}
+.rolecard{border-radius:22px;padding:30px 20px;text-align:center;border:2px solid var(--line);background:var(--surface-solid);box-shadow:var(--shadow)}
+.rolecard .disp{font-size:52px;line-height:1.1}
+.rolecard p{margin-top:10px;font-size:16px;color:var(--muted)}
+.rolecard.r-smart{border-color:var(--a3)} .rolecard.r-smart .disp{color:var(--a3)}
+.rolecard.r-honest{border-color:var(--a2)} .rolecard.r-honest .disp{color:var(--a2)}
+.rolecard.r-bluffer{border-color:var(--a1)} .rolecard.r-bluffer .disp{color:var(--a1)}
+[data-skin="night"] .rolecard.r-smart{box-shadow:0 0 28px #ffd25a44}
+[data-skin="night"] .rolecard.r-honest{box-shadow:0 0 28px #3ee6e044}
+[data-skin="night"] .rolecard.r-bluffer{box-shadow:0 0 28px #ff4fa344}
+[data-skin="sakura"] .rolecard.r-smart .disp,[data-skin="sakura"] .rtag.r-smart{color:#c56b98}
+.rtag{font-size:12px;font-weight:700;padding:3px 9px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.rtag.r-smart{color:var(--a3)} .rtag.r-honest{color:var(--a2)} .rtag.r-bluffer{color:var(--a1)} .rtag.r-none{color:var(--muted)}
+[data-skin="oc"] .rtag.r-smart{color:#c96d12}
+.mine-role{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;font-size:14px;color:var(--muted)}
+.mine-role + .answer{margin-top:10px}
+.row.cur{background:linear-gradient(90deg,transparent,var(--line),transparent)}
+.cands{display:grid;gap:10px}
+.cand{padding:18px;border-radius:16px;border:1.5px solid var(--line);background:var(--surface);font-size:18px;font-weight:700;text-align:left}
+.cand.on{border-color:var(--a1);border-width:2.5px;background:var(--well)}
+[data-skin="night"] .cand.on{box-shadow:0 0 18px #ff4fa355}

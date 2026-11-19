@@ -7,7 +7,7 @@ const params = new URLSearchParams(location.search);
 const MOCK = params.has('mock') || !cfg.supabaseUrl || !cfg.supabaseAnonKey;
 const ONLINE_MS = 20000;
 const VOTE_MS = 20000;
-const GAMES_READY = ['dice', 'truth'];
+const GAMES_READY = ['dice', 'truth', 'king', 'bluff'];
 
 // ---------- 正式版 ----------
 async function rpc(fn, args) {
@@ -85,16 +85,152 @@ function draw(db, st, type, cat, online) {
   return { id: q.id, type: q.type, cat: q.cat, text, answer: q.answer, explain: q.explain, target };
 }
 
+const kingClear = k => {
+  const { targets, q, results, show_answer, ...round } = k;
+  return { ...round, phase: 'command', key: rid(12) };
+};
+const kingSetup = (mode = 'secret', round = 0) => ({ phase: 'setup', mode, round });
+function kingRound(k, king, online, advance = true) {
+  if (!online.includes(king) || online.length < 2) return kingSetup(k.mode, k.round);
+  const numbered = shuffle(online.filter(id => id !== king));
+  return { phase: 'command', mode: k.mode, round: k.round + Number(advance), king, key: rid(12),
+    numbers: Object.fromEntries(numbered.map((id, index) => [id, index + 1])), size: numbered.length };
+}
+function kingAction(db, st, online, me, action, a) {
+  const k = st.king;
+  if (st.game !== 'king' || !k) return 'no_game';
+  if (st.paused) return 'paused';
+  if (!k.key || a.key !== k.key) return 'phase';
+
+  if (action === 'k_publish') {
+    if (k.phase !== 'command') return 'phase';
+    if (k.king !== me) return 'not_yours';
+    const nums = a.numbers;
+    if (!Array.isArray(nums) || !nums.length || new Set(nums).size !== nums.length ||
+        nums.some(n => !Number.isInteger(n) || n < 1 || n > k.size)) return 'king_numbers';
+    const targets = Object.keys(k.numbers).filter(id => nums.includes(k.numbers[id])).sort();
+    if (targets.some(id => !online.includes(id))) return 'king_offline';
+    let q;
+    if (a.type === 'custom') {
+      const text = typeof a.text === 'string' ? a.text.trim() : '';
+      if (!text || [...text].length > 200) return 'king_text';
+      q = { text };
+    } else {
+      if (!['truth', 'dare', 'quiz'].includes(a.type)) return 'bad_kind';
+      q = draw(db, { ...st, truth: { ...truthInit('dice'), takers: targets } }, a.type, '', online);
+      if (!q) return 'empty';
+      st.used_q = add(st.used_q, q.id);
+    }
+    st.king = { ...k, phase: 'challenge', targets, q, results: {}, show_answer: false };
+  } else if (action === 'k_answer') {
+    if (k.phase !== 'challenge' || !k.q.answer || k.show_answer) return 'phase';
+    if (me !== k.king && !k.targets.includes(me)) return 'not_yours';
+    k.show_answer = true;
+  } else if (action === 'k_result') {
+    if (k.phase !== 'challenge' || k.results[me]) return 'phase';
+    if (!k.targets.includes(me)) return 'not_yours';
+    if (!['done', 'skip'].includes(a.result)) return 'bad_kind';
+    k.results[me] = a.result;
+    if (k.targets.every(id => k.results[id])) {
+      if (Object.values(k.results).includes('done')) k.phase = 'handover';
+      else st.king = kingClear(k);
+    }
+  } else if (action === 'k_next') {
+    if (k.phase !== 'handover') return 'phase';
+    if (k.king !== me && (online.includes(k.king) || !k.numbers[me])) return 'not_yours';
+    const eligible = k.targets.filter(id => k.results[id] === 'done' && online.includes(id));
+    if (!eligible.length || online.length < 2) return 'king_offline';
+    const next = a.player === 'random' ? pick(eligible) : a.player;
+    if (!eligible.includes(next)) return 'bad_target';
+    st.king = kingRound(k, next, online);
+  } else return 'bad_action';
+  return null;
+}
+
+// ---------- 瞎掰王（对照 SQL 的 _ldc_bluff_*） ----------
+const bluffInit = () => ({ phase: 'setup', mode: 'knowledge', timer: 0, scoring: true, round: 0, players: [], want: {}, deadline: null,
+  smart: null, volunteered: false, roles: {}, seen: [], q: null, order: [], cur: 0, skipped: [], pick: null, correct: null, void: false,
+  honest: null, delta: {}, scores: {}, timer_end: null, timer_left: null, history: [] });
+const bluffRecruit = (b, online) => ({ ...b, phase: 'recruit', round: (b.round || 0) + 1, players: online.slice(), want: {}, deadline: Date.now() + VOTE_MS,
+  smart: null, volunteered: false, roles: {}, seen: [], q: null, order: [], cur: 0, skipped: [], pick: null, correct: null, void: false,
+  honest: null, delta: {}, timer_end: null, timer_left: null });
+function bluffAssign(b) {
+  const others = b.players.filter(x => x !== b.smart), h = pick(others), roles = {};
+  others.forEach(x => { roles[x] = x === h ? 'honest' : 'bluffer'; });
+  return { ...b, phase: 'roles', roles, seen: [], q: null, order: [], cur: 0, skipped: [], pick: null, timer_end: null, timer_left: null };
+}
+function bluffDraw(st) {
+  const Q = (window.LDC_QUESTIONS || []).filter(q => q.game === 'bluff' && q.type === st.bluff.mode), used = st.used_q || [];
+  const q = pick(Q.filter(x => !used.includes(x.id))) || pick(Q);
+  return q ? { id: q.id, cat: q.cat, text: q.text, answer: q.answer, explain: q.explain } : null;
+}
+function bluffFinish(b, pk, isVoid) {
+  const honest = Object.keys(b.roles || {}).find(k => b.roles[k] === 'honest') || null;
+  const ok = !isVoid && pk != null && pk === honest;
+  let delta = {}; const sc = { ...(b.scores || {}) };
+  if (!isVoid && b.scoring !== false && pk != null) {
+    delta = ok ? { [b.smart]: 2, [honest]: 2 } : { [pk]: 2 };
+    Object.keys(delta).forEach(k => { sc[k] = (sc[k] || 0) + delta[k]; });
+  }
+  const h = { round: b.round, smart: b.smart, honest, pick: pk, correct: ok, void: isVoid, q: b.q && b.q.text, delta };
+  return { ...b, phase: 'reveal', pick: pk, correct: ok, void: isVoid, honest, delta, scores: sc, timer_end: null, timer_left: null, history: [h, ...(b.history || [])].slice(0, 10) };
+}
+function bluffSettle(st, online) {
+  let b = st.bluff; if (!b) return st;
+  const pon = (b.players || []).filter(x => online.includes(x));
+  if (b.phase === 'recruit') {
+    if (pon.every(x => x in b.want) || Date.now() >= b.deadline) {
+      if (pon.length < 3) b = { ...b, phase: 'setup' };
+      else {
+        const vol = pon.filter(x => b.want[x] === true);
+        b = bluffAssign({ ...b, players: pon, volunteered: vol.length > 0, smart: pick(vol.length ? vol : pon) });
+      }
+    }
+  } else if (b.phase === 'roles') {
+    if (pon.length && subset(pon, b.seen)) {
+      st.bluff = b; const q = bluffDraw(st);
+      if (q) {
+        b = { ...b, q, phase: 'speak', cur: 0, skipped: [], timer_left: null, order: shuffle(b.players.filter(x => x !== b.smart)),
+              timer_end: b.timer > 0 ? Date.now() + b.timer * 1000 : null };
+        st.used_q = [q.id, ...(st.used_q || [])].slice(0, 400);
+      }
+    }
+  }
+  st.bluff = b; return st;
+}
+
 function applyProposal(st, p, online) {
   st = { ...st };
   const d = st.dice, tr = st.truth;
   if (p.kind === 'switch_game') {
     st.game = p.payload.game ?? null; st.paused = false; delete st.paused_by;
+    delete st.king;
+    if (st.game === 'king') st.king = kingSetup();
     if (st.game === 'dice') st.dice = diceInit();
     if (st.game === 'truth') st.truth = { ...truthInit('setup'), timer: (tr && tr.timer) || 0 };
+    if (st.game === 'bluff') {
+      const keep = {}; ['mode', 'timer', 'scoring', 'scores', 'round', 'history'].forEach(k => { if (st.bluff && k in st.bluff) keep[k] = st.bluff[k]; });
+      st.bluff = { ...bluffInit(), ...keep };
+    }
   } else if (p.kind === 'resume') {
     st.paused = false; delete st.paused_by;
     if (tr && typeof tr.timer_left === 'number') st.truth = { ...tr, timer_end: Date.now() + tr.timer_left, timer_left: null };
+    if (st.bluff && typeof st.bluff.timer_left === 'number') st.bluff = { ...st.bluff, timer_end: Date.now() + st.bluff.timer_left, timer_left: null };
+  } else if (p.kind === 'restart_round' && st.game === 'bluff') {
+    st.bluff = { ...st.bluff, phase: 'setup', roles: {}, smart: null, q: null, timer_end: null, timer_left: null };
+  } else if (p.kind === 'bluff_redraw' && st.bluff) {
+    st.bluff = bluffAssign(st.bluff);
+  } else if (p.kind === 'bluff_void' && st.bluff) {
+    st.bluff = bluffFinish(st.bluff, null, true);
+  } else if (st.game === 'king' && p.kind === 'king_start') {
+    const { mode, player } = p.payload;
+    st.king = kingRound(kingSetup(mode, st.king.round), player === 'random' ? pick(online) : player, online);
+  } else if (st.game === 'king' && p.kind === 'king_redeal' && st.king.phase === 'command' && st.king.key === p.payload.key) {
+    st.king = kingRound(st.king, st.king.king, online, false);
+  } else if (st.game === 'king' && p.kind === 'king_skip' && st.king.phase === 'challenge' && st.king.key === p.payload.key) {
+    st.king = kingClear(st.king);
+  } else if (st.game === 'king' && p.kind === 'restart_round') {
+    st.king = kingSetup(st.king.mode, Math.max(st.king.round - 1, 0));
   } else if (p.kind === 'restart_round' && st.game === 'truth') {
     st.truth = { ...truthInit('setup'), timer: (tr && tr.timer) || 0 };
   } else if (p.kind === 'skip_player' && d) {
@@ -126,6 +262,7 @@ function settle(st, online) {
     }
     st.dice = d;
   }
+  if (st.game === 'bluff' && st.bluff) st = bluffSettle(st, online);
   return st;
 }
 const roomPlayers = (db, room) => db.players.filter(p => p.room_id === room.id).sort((a, b) => a.seat - b.seat);
@@ -138,6 +275,21 @@ function view(db, room, me) {
   }
   if (st.truth && st.truth.q && !st.truth.show_answer) {
     const q = { ...st.truth.q, has_answer: st.truth.q.answer != null }; delete q.answer; delete q.explain; st.truth.q = q;
+  }
+  const k = st.king;
+  if (k?.mode === 'secret' && k.numbers) {
+    const mine = k.numbers[me];
+    k.numbers = mine ? { [me]: mine } : {};
+  }
+  if (k?.q && !k.show_answer) {
+    k.q.has_answer = Boolean(k.q.answer);
+    delete k.q.answer;
+    delete k.q.explain;
+  }
+  if (st.game === 'bluff' && st.bluff && st.bluff.phase !== 'reveal') {
+    const mine = st.bluff.roles[me];
+    st.bluff.roles = mine == null ? {} : { [me]: mine };
+    if (st.bluff.q && mine !== 'honest') { const q = { ...st.bluff.q }; delete q.answer; delete q.explain; st.bluff.q = q; }
   }
   delete st.used_q;
   return {
@@ -211,7 +363,23 @@ const mock = {
       else if (k === 'skip_player') {
         const t = a.payload?.player;
         if (st.game !== 'dice' || d?.phase !== 'rolling' || !d.participants.includes(t) || d.done.includes(t) || t === me) err = 'bad_target';
-      } else if (k === 'restart_round') { if (!['dice', 'truth'].includes(st.game)) err = 'no_game'; }
+      } else if (k === 'king_start') {
+        const { mode, player } = a.payload || {};
+        if (st.game !== 'king' || st.king.phase !== 'setup') err = 'phase';
+        else if (st.paused) err = 'paused';
+        else if (online.length < 2) err = 'king_people';
+        else if (!['public', 'secret'].includes(mode) || (player !== 'random' && !online.includes(player))) err = 'bad_target';
+      } else if (k === 'king_redeal' || k === 'king_skip') {
+        const king = st.king;
+        if (st.game !== 'king' || !king || king.key !== a.payload?.key ||
+            king.phase !== (k === 'king_redeal' ? 'command' : 'challenge')) err = 'phase';
+        else if (st.paused) err = 'paused';
+        else if (k === 'king_redeal' && (!online.includes(king.king) || online.length < 2)) err = 'king_offline';
+      } else if (k === 'restart_round') { if (!['dice', 'truth', 'king', 'bluff'].includes(st.game)) err = 'no_game'; }
+      else if (k === 'bluff_redraw' || k === 'bluff_void') {
+        const ph = st.bluff && st.bluff.phase;
+        if (st.game !== 'bluff' || !['roles', 'speak', 'ask', 'guess'].includes(ph) || (k === 'bluff_redraw' && ph === 'guess')) err = 'phase';
+      }
       else err = 'bad_kind';
       if (!err) st.proposal = { id: rid(4), kind: k, payload: a.payload || {}, by: me, votes: { [me]: true }, deadline: now + VOTE_MS, at: now };
     } else if (action === 'vote') {
@@ -224,7 +392,10 @@ const mock = {
       else if (!st.paused) {
         st.paused = true; st.paused_by = me; st.notice = { kind: 'pause', ok: true, by: me, at: now };
         if (st.truth && typeof st.truth.timer_end === 'number') { st.truth.timer_left = Math.max(st.truth.timer_end - now, 0); st.truth.timer_end = null; }
+        if (st.bluff && typeof st.bluff.timer_end === 'number') { st.bluff.timer_left = Math.max(st.bluff.timer_end - now, 0); st.bluff.timer_end = null; }
       }
+    } else if (typeof action === 'string' && action.startsWith('k_')) {
+      err = kingAction(db, st, online, me, action, a);
     } else if (['ready', 'unready', 'roll', 'next_round'].includes(action)) {
       if (st.game !== 'dice' || !d) err = 'no_game';
       else if (st.paused) err = 'paused';
@@ -288,6 +459,53 @@ const mock = {
         if (t.mode !== 'dice') err = 'phase';
         else { st.game = 'dice'; st.dice = diceNewRound(st.dice || diceInit(), online); }
       } else err = 'bad_action';
+    } else if (action.startsWith('b_')) {
+      let b = st.bluff;
+      if (st.game !== 'bluff' || !b) err = 'no_game';
+      else if (st.paused) err = 'paused';
+      else if (action === 'b_setup') {
+        if (b.phase !== 'setup') err = 'phase';
+        else {
+          if ('mode' in a) { if (['knowledge', 'story'].includes(a.mode)) b.mode = a.mode; else err = 'bad_action'; }
+          if ('scoring' in a) b.scoring = a.scoring !== false;
+        }
+      } else if (action === 'b_timer') {
+        const v = +a.secs || 0;
+        if (![0, 30, 60, 90].includes(v)) err = 'bad_action';
+        else Object.assign(b, { timer: v, timer_left: null, timer_end: v > 0 && b.phase === 'speak' ? now + v * 1000 : null });
+      } else if (action === 'b_start' || action === 'b_next_round') {
+        if ((action === 'b_start' && b.phase !== 'setup') || (action === 'b_next_round' && b.phase !== 'reveal')) err = 'phase';
+        else if (online.length < 3) err = 'need3';
+        else b = bluffRecruit(b, online);
+      } else if (action === 'b_want') {
+        if (b.phase !== 'recruit') err = 'phase';
+        else if (!b.players.includes(me)) err = 'not_in_round';
+        else b.want = { ...b.want, [me]: !!a.yes };
+      } else if (action === 'b_seen') {
+        if (b.phase !== 'roles') err = 'phase';
+        else if (!b.players.includes(me)) err = 'not_in_round';
+        else b.seen = add(b.seen, me);
+      } else if (action === 'b_next' || action === 'b_skip_speak') {
+        const cur = b.order[b.cur];
+        if (b.phase !== 'speak') err = 'phase';
+        else if (action === 'b_skip_speak' && cur !== me) err = 'not_yours';
+        else if (action === 'b_next' && !(cur === me || b.smart === me || (!online.includes(cur) && !online.includes(b.smart)))) err = 'not_yours';
+        else {
+          if (action === 'b_skip_speak') b.skipped = add(b.skipped, me);
+          if (b.cur + 1 >= b.order.length) Object.assign(b, { phase: 'ask', cur: b.order.length, timer_end: null, timer_left: null });
+          else Object.assign(b, { cur: b.cur + 1, timer_left: null, timer_end: b.timer > 0 ? now + b.timer * 1000 : null });
+        }
+      } else if (action === 'b_to_guess') {
+        if (b.phase !== 'ask') err = 'phase';
+        else if (b.smart !== me && online.includes(b.smart)) err = 'not_yours';
+        else b.phase = 'guess';
+      } else if (action === 'b_pick') {
+        if (b.phase !== 'guess') err = 'phase';
+        else if (b.smart !== me && online.includes(b.smart)) err = 'not_yours';
+        else if (!a.player || !b.order.includes(a.player)) err = 'bad_target';
+        else b = bluffFinish(b, a.player, false);
+      } else err = 'bad_action';
+      if (!err) st.bluff = b;
     } else err = 'bad_action';
 
     st = settle(st, online);

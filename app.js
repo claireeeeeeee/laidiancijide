@@ -28,7 +28,9 @@ const ERR = {
   already: '你已经摇过了', stale: '这个提议已经结束了', network: '网络不太好，再试一次', not_member: '你已经不在这个房间了',
   not_found: '没有这个房间，检查一下房间号', forbidden: '管理员钥匙不对', bad_name: '名字要 1 到 12 个字', full: '房间满了（最多 16 人）',
   not_yours: '现在不是你来操作', empty: '这个分类没有题了', bad_code: '房间号要 6 位数字', code_taken: '这个房间号已经有了',
-  not_installed: '服务器还没装好', server: '服务器出错了，再试一次', no_game: '现在没有在玩游戏', bad_kind: '操作不对', bad_action: '操作不对'
+  king_people: '至少两位玩家在线才能开始', king_numbers: '请选择有效的挑战号码', king_text: '命令要写 1 到 200 个字',
+  king_offline: '有相关玩家离线，可以等 TA 回来或重新安排本轮',
+  need3: '至少 3 个人在线才能玩', not_installed: '服务器还没装好', server: '服务器出错了，再试一次', no_game: '现在没有在玩游戏', bad_kind: '操作不对', bad_action: '操作不对'
 };
 const TTYPES = [{ id: 'truth', name: '真心话', hl: 'hl1' }, { id: 'dare', name: '大冒险', hl: 'hl2' }, { id: 'quiz', name: '智力问答', hl: 'hl3' }];
 const TCATS = {
@@ -43,6 +45,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const S = {
   view: 'home', code: null, token: null, data: null, sig: '', offset: 0, lastNotice: null,
   tType: 'truth', tCat: '',
+  kingPlayer: 'random', kingDraft: { key: null, text: '', numbers: [] },
   rolling: false, landed: false, menu: false, sheet: null, offline: false, flicked: false, motion: null
 };
 let unsub = null, pollTimer = null, tickTimer = null, inflight = false, bumpTimer = null;
@@ -146,7 +149,12 @@ function proposalHTML() {
   if (p.kind === 'switch_game') what = p.payload.game ? `想玩${gameName(p.payload.game)}` : '想回大厅';
   else if (p.kind === 'resume') what = '想继续';
   else if (p.kind === 'skip_player') what = `想跳过${esc(pname(p.payload.player))}`;
-  else if (p.kind === 'restart_round') what = st().game === 'truth' ? '想换个玩法' : '想重开这一轮';
+  else if (p.kind === 'king_start') what = `提议${p.payload.player === 'random' ? '随机选国王' : `让${esc(pname(p.payload.player))}当国王`} · ${p.payload.mode === 'public' ? '公开编号' : '秘密编号'}`;
+  else if (p.kind === 'king_redeal') what = '想重新发编号';
+  else if (p.kind === 'king_skip') what = '想跳过当前命令';
+  else if (p.kind === 'bluff_redraw') what = '想换题（身份重新分）';
+  else if (p.kind === 'bluff_void') what = '想让这轮作废';
+  else if (p.kind === 'restart_round') what = st().game === 'truth' ? '想换个玩法' : st().game === 'bluff' ? '想改设置' : '想重开这一轮';
   const voted = !!p.votes[me()], mine = p.by === me();
   const btns = mine ? `<button class="no" data-act="vote" data-id="${p.id}" data-yes="0">撤回</button>`
     : voted ? '' : `<button class="yes" data-act="vote" data-id="${p.id}" data-yes="1">同意</button><button class="no" data-act="vote" data-id="${p.id}" data-yes="0">不了</button>`;
@@ -312,10 +320,200 @@ function truthHTML() {
   return '';
 }
 
+function kingHTML() {
+  const k = st().king;
+  if (!k) return '';
+  const online = onlineIds();
+  if (k.phase === 'setup') {
+    const options = players().filter(p => p.online).map(p =>
+      `<option value="${esc(p.id)}"${S.kingPlayer === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+    return `<div class="h-cap">国王游戏</div><h1 class="h-title disp">谁来当国王</h1>
+      <div class="stack">
+        <label class="stack">本轮国王<select id="kingPlayer" class="king-field"><option value="random">随机选人</option>${options}</select></label>
+        <p class="note">至少两位玩家在线。选定编号方式后，由大家确认开局。</p>
+        <button class="btn b1" data-act="k-start" data-mode="secret" ${online.length < 2 ? 'disabled' : ''}>秘密编号</button>
+        <button class="btn b3" data-act="k-start" data-mode="public" ${online.length < 2 ? 'disabled' : ''}>公开编号</button>
+      </div>`;
+  }
+  const isKing = k.king === me();
+  const myNumber = k.numbers[me()];
+  const numbers = k.mode === 'public'
+    ? `<div class="chips">${Object.entries(k.numbers).sort((a, b) => a[1] - b[1])
+        .map(([id, n]) => `<span class="chip">${n}号 · ${esc(pname(id))}</span>`).join('')}</div>`
+    : myNumber ? `<p class="note">只有你能看到自己的编号：${myNumber}号</p>` : '';
+  const head = `<div class="h-cap">国王游戏 · 第 ${k.round} 轮</div>
+    <h1 class="h-title disp">${isKing ? '你是国王' : `${esc(pname(k.king))}是国王`}</h1>${numbers}`;
+  const restart = '<button class="link" data-act="k-restart">重新指定国王</button>';
+  if (k.phase === 'command') {
+    const draft = S.kingDraft;
+    const buttons = Array.from({ length: k.size }, (_, i) => i + 1).map(n =>
+      `<button class="chip ${draft.numbers.includes(n) ? 'on' : ''}" aria-pressed="${draft.numbers.includes(n)}" data-act="k-num" data-num="${n}">${n}号</button>`).join('');
+    return head + (isKing ? `<div class="stack king-controls">
+      <div>选择一个或多个号码<div class="chips">${buttons}</div></div>
+      <label class="stack">自写命令<textarea id="kingText" class="king-field" rows="3" maxlength="200" placeholder="写下要完成的挑战">${esc(draft.text)}</textarea></label>
+      <button class="btn b1" data-act="k-publish" data-type="custom">发布命令</button>
+      <div>或从题库抽一题<div class="chips">${TTYPES.map(x => `<button class="chip" data-act="k-publish" data-type="${x.id}">${x.name}</button>`).join('')}</div></div>
+    </div>` : '<p class="note">等国王发布命令</p>') +
+      `<div class="push stack"><button class="link" data-act="k-redeal" ${online.length < 2 || !online.includes(k.king) ? 'disabled' : ''}>重新发编号</button>${restart}</div>`;
+  }
+  const myTask = k.targets.includes(me()), q = k.q;
+  const task = `<div class="qcard king-controls"><p>${esc(q.text)}</p></div>
+    <div class="chips">${k.targets.map(id => `<span class="chip">${esc(pname(id))} · ${k.results[id] === 'done' ? '已完成' : k.results[id] === 'skip' ? '已跳过' : '等待挑战'}</span>`).join('')}</div>
+    ${k.show_answer && q.answer ? `<div class="answer"><b>答案</b>${esc(q.answer)}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>` : ''}`;
+  if (k.phase === 'challenge') {
+    return head + task + `<div class="push stack">
+      ${!k.show_answer && q.has_answer && (isKing || myTask) ? '<button class="btn b3" data-act="k-answer">看答案</button>' : ''}
+      ${myTask && !k.results[me()] ? '<div class="row2"><button class="btn b1" data-act="k-result" data-result="done">完成挑战</button><button class="btn b3" data-act="k-result" data-result="skip">我跳过</button></div>' : ''}
+      <button class="link" data-act="k-skip">提议跳过整道命令</button>${restart}</div>`;
+  }
+  const eligible = k.targets.filter(id => k.results[id] === 'done' && online.includes(id));
+  const canPick = isKing || (!online.includes(k.king) && Boolean(myNumber));
+  return head + task + `<div class="push stack">
+    <p class="note">${eligible.length && online.length >= 2 ? canPick ? '从已完成挑战的人中选下一任国王' : '等国王交接' : '等待完成挑战的玩家上线，或重新指定国王'}</p>
+    ${canPick && eligible.length && online.length >= 2 ? `<div class="chips">${eligible.map(id =>
+      `<button class="chip" data-act="k-next" data-player="${esc(id)}">${esc(pname(id))}接任</button>`).join('')}</div>
+      ${eligible.length > 1 ? '<button class="btn b1" data-act="k-next" data-player="random">随机选下一任</button>' : ''}` : ''}
+    ${restart}</div>`;
+}
+
+// ---------- 瞎掰王 ----------
+const BMODES = [{ id: 'knowledge', name: '知识瞎掰', sub: '只有老实人知道答案', hl: 'hl1' }, { id: 'story', name: '故事瞎掰', sub: '老实人讲真事', hl: 'hl2' }];
+const BTIMERS = [[0, '不限'], [30, '30 秒'], [60, '60 秒'], [90, '90 秒']];
+const ROLE_NAME = { smart: '大聪明', honest: '老实人', bluffer: '瞎掰人' };
+function roleTip(role, mode) {
+  if (role === 'smart') return '听大家讲，找出唯一的老实人';
+  if (role === 'honest') return mode === 'knowledge' ? '你能看到答案，照实说' : '讲一件真实发生过的事';
+  if (role === 'bluffer') return mode === 'knowledge' ? '你看不到答案，编一个像真的' : '编一个没发生过的事';
+  return '这一轮你在旁边看';
+}
+function bluffScores(b) {
+  const sc = b.scores || {}, ids = Object.keys(sc);
+  if (!b.scoring || !ids.length) return '';
+  ids.sort((x, y) => sc[y] - sc[x]);
+  return `<div class="h-cap" style="margin-top:18px">总分</div><div class="list">${ids.map(id => `<div class="row"><span class="who">${esc(pname(id))}${id === me() ? '（我）' : ''}</span><span class="n" style="font-size:26px;width:auto">${sc[id]}</span></div>`).join('')}</div>`;
+}
+function bluffMine(b) {
+  const my = me(), role = b.smart === my ? 'smart' : (b.roles || {})[my];
+  const q = b.q || {};
+  let html = `<p class="mine-role"><span class="rtag r-${role || 'none'}">${role ? '你是' + ROLE_NAME[role] : '你在旁边看'}</span>${role ? roleTip(role, b.mode) : ''}</p>`;
+  if (role === 'honest' && q.answer) html += `<div class="answer"><b>答案（只有你看得到）</b>${esc(q.answer)}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>`;
+  return html;
+}
+function bluffHTML() {
+  const b = st().bluff || {}, my = me();
+  const inRound = (b.players || []).includes(my), isSmart = b.smart === my;
+  const youOr = id => id === my ? '你' : esc(pname(id));
+  const links = (redraw) => `<div class="foot">${redraw ? '<button class="link" data-act="b-redraw">换题</button>' : ''}<button class="link" data-act="b-void">这轮作废</button></div>`;
+  if (b.phase === 'setup') {
+    const on = onlineIds().length;
+    return `
+      <div class="h-cap">瞎掰王</div>
+      <h1 class="h-title disp">设置</h1>
+      <div class="bmodes">${BMODES.map(m => `<button class="type ${b.mode === m.id ? 'on' : ''}" data-act="b-mode" data-mode="${m.id}"><span class="disp ${m.hl}">${m.name}</span><small>${m.sub}</small></button>`).join('')}</div>
+      <div class="timer-row"><span>每人发言</span>${BTIMERS.map(([v, n]) => `<button class="chip ${(b.timer || 0) === v ? 'on' : ''}" data-act="b-timer" data-secs="${v}">${n}</button>`).join('')}</div>
+      <div class="timer-row"><span>计分</span><button class="chip ${b.scoring !== false ? 'on' : ''}" data-act="b-score" data-on="1">开</button><button class="chip ${b.scoring === false ? 'on' : ''}" data-act="b-score" data-on="0">关</button></div>
+      ${bluffScores(b)}
+      <div class="push stack">
+        ${on < 3 ? '<p class="note">至少 3 个人在线才能开始</p>' : ''}
+        <button class="btn b1" data-act="b-start" ${on < 3 ? 'disabled' : ''}>开始</button>
+      </div>`;
+  }
+  if (b.phase === 'recruit') {
+    const want = b.want || {};
+    const rows = (b.players || []).map(id => `<div class="row"><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}</span>
+      <span class="st ${want[id] === true ? 'ok' : ''}">${want[id] === true ? '想当' : want[id] === false ? '不当' : '还没选'}</span></div>`).join('');
+    return `
+      <div class="h-cap">第 ${b.round} 轮，<span data-countdown="${b.deadline}">${Math.max(0, Math.ceil((b.deadline - serverNow()) / 1000))}</span> 秒</div>
+      <h1 class="h-title disp">谁当大聪明</h1>
+      <div class="list">${rows}</div>
+      <p class="note">有人想当就从里面抽一个，没人想当就随机</p>
+      <div class="push stack">${inRound ? `<div class="row2">
+        <button class="btn ${want[my] === true ? 'b1' : 'b3'}" data-act="b-want" data-yes="1">我想当</button>
+        <button class="btn ${want[my] === false ? 'b1' : 'b3'}" data-act="b-want" data-yes="0">这轮不当</button></div>` : '<p class="note">这一轮你在旁边看</p>'}</div>`;
+  }
+  if (b.phase === 'roles') {
+    const role = isSmart ? 'smart' : (b.roles || {})[my];
+    const seen = (b.seen || []).includes(my);
+    const on = (b.players || []).filter(id => onlineIds().includes(id));
+    return `
+      <div class="h-cap">第 ${b.round} 轮，大聪明是${youOr(b.smart)}</div>
+      <h1 class="h-title disp">你的身份</h1>
+      <div class="rolecard r-${role || 'none'}"><div class="disp">${role ? ROLE_NAME[role] : '旁观'}</div><p>${roleTip(role, b.mode)}</p></div>
+      <p class="note">${(b.seen || []).length}/${on.length} 已确认</p>
+      <div class="push stack">${inRound && !seen ? '<button class="btn b1" data-act="b-seen">我知道了</button>' : '<p class="note">等其他人确认</p>'}</div>
+      ${links(false)}`;
+  }
+  const q = b.q || {};
+  const qcard = `<div class="qcard"><p>${esc(q.text || '')}</p>${b.phase === 'speak' && timerText(b) ? `<div class="timer" data-btimer>${timerText(b)}</div>` : ''}</div>`;
+  if (b.phase === 'speak') {
+    const cur = b.order[b.cur];
+    const rows = b.order.map((id, i) => `<div class="row ${i === b.cur ? 'cur' : ''}"><span class="n" style="font-size:22px;width:28px">${i + 1}</span><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}</span>
+      <span class="st ${i < b.cur ? 'ok' : ''}">${i < b.cur ? ((b.skipped || []).includes(id) ? '跳过了' : '说完了') : i === b.cur ? '正在说' : ''}</span></div>`).join('');
+    const offlineBoth = !onlineIds().includes(cur) && !onlineIds().includes(b.smart);
+    return `
+      <div class="h-cap">${b.mode === 'knowledge' ? '知识瞎掰' : '故事瞎掰'}，${esc(q.cat || '')}</div>
+      <h1 class="h-title disp">${youOr(cur)}来说</h1>
+      ${qcard}
+      ${bluffMine(b)}
+      <div class="list" style="margin-top:12px">${rows}</div>
+      <div class="push stack" style="margin-top:14px">
+        ${cur === my ? '<button class="btn b1" data-act="b-next">说完了</button><button class="link" data-act="b-skip">不想说，跳过</button>'
+          : isSmart || offlineBoth ? '<button class="btn b2" data-act="b-next">下一位</button>' : `<p class="note">等${esc(pname(cur))}说完</p>`}
+      </div>
+      ${links(true)}`;
+  }
+  if (b.phase === 'ask') {
+    const smartOff = !onlineIds().includes(b.smart);
+    return `
+      <div class="h-cap">大家都说完了</div>
+      <h1 class="h-title disp">追问时间</h1>
+      ${qcard}
+      ${bluffMine(b)}
+      <div class="push stack" style="margin-top:14px">
+        ${isSmart || smartOff ? '<p class="note">想问谁就问谁，问完去猜</p><button class="btn b1" data-act="b-to-guess">去猜老实人</button>' : `<p class="note">${esc(pname(b.smart))}在追问</p>`}
+      </div>
+      ${links(true)}`;
+  }
+  if (b.phase === 'guess') {
+    const can = isSmart || !onlineIds().includes(b.smart);
+    if (S.bPick && !b.order.includes(S.bPick)) S.bPick = null;
+    return `
+      <div class="h-cap">${esc(q.text || '')}</div>
+      <h1 class="h-title disp">${can ? '谁是老实人' : `${esc(pname(b.smart))}在猜`}</h1>
+      <div class="cands">${b.order.map(id => `<button class="cand ${S.bPick === id ? 'on' : ''}" data-act="b-cand" data-pid="${id}" ${can ? '' : 'disabled'}>${esc(pname(id))}${id === my ? '（我）' : ''}</button>`).join('')}</div>
+      <div class="push stack">${can ? `<button class="btn b1" data-act="b-pick" ${S.bPick ? '' : 'disabled'}>${S.bPick ? `确定是${esc(pname(S.bPick))}` : '先选一个人'}</button><p class="note">确定后不能改</p>` : ''}</div>
+      ${links(false)}`;
+  }
+  if (b.phase === 'reveal') {
+    const roles = b.roles || {};
+    const ids = [b.smart, ...(b.order && b.order.length ? b.order : Object.keys(roles))].filter((x, i, a) => x && a.indexOf(x) === i);
+    const rows = ids.map(id => {
+      const role = id === b.smart ? 'smart' : roles[id];
+      const d = (b.delta || {})[id];
+      return `<div class="row"><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}${id === b.pick ? '<span class="st">（被选中）</span>' : ''}</span>
+        <span class="rtag r-${role}">${ROLE_NAME[role] || ''}</span>${d ? `<span class="st ok">+${d}</span>` : ''}</div>`;
+    }).join('');
+    const title = b.void ? '这轮作废' : b.correct ? '猜中了' : '猜错了';
+    const sub = b.void ? '不计分' : `${youOr(b.smart)}选了${b.pick ? youOr(b.pick) : '—'}，老实人是${youOr(b.honest)}`;
+    return `
+      <div class="h-cap">第 ${b.round} 轮</div>
+      <h1 class="h-title disp ${b.void ? '' : b.correct ? 'hl1' : 'hl2'}">${title}</h1>
+      <p class="note" style="text-align:left;margin:-8px 0 12px">${sub}</p>
+      <div class="list reveal">${rows}</div>
+      ${q.text ? `<div class="answer" style="margin-top:12px"><b>${esc(q.text)}</b>${q.answer ? esc(q.answer) : '老实人讲的是真事'}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>` : ''}
+      ${bluffScores(b)}
+      <div class="push stack" style="margin-top:16px">
+        <button class="btn b1" data-act="b-next-round">下一轮</button>
+        <button class="link" data-act="b-restart">改设置</button>
+      </div>`;
+  }
+  return '';
+}
+
 function roomHTML() {
   const s = st();
   const inGame = !!s.game;
-  const body = !inGame ? lobbyHTML() : s.game === 'dice' ? diceHTML() : s.game === 'truth' ? truthHTML() : '';
+  const body = !inGame ? lobbyHTML() : s.game === 'dice' ? diceHTML() : s.game === 'truth' ? truthHTML() : s.game === 'king' ? kingHTML() : s.game === 'bluff' ? bluffHTML() : '';
   return `
   <div class="topbar">
     ${inGame ? '<button class="icon-btn" data-act="back-lobby">‹ 大厅</button>' : `<span class="st" style="font-size:13px;color:var(--muted)">${players().filter(p => p.online).length} 人在线</span>`}
@@ -377,8 +575,11 @@ function renderOverlay() { overlay.innerHTML = sheetHTML() + menuHTML(); }
 // ---------- 渲染 ----------
 function render() {
   const keepCode = $('#codeInput') ? $('#codeInput').value : '';
+  const kingFocused = document.activeElement?.id === 'kingText';
+  const kingSelection = kingFocused ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
   app.innerHTML = S.view === 'home' ? homeHTML() : S.view === 'name' ? nameHTML() : S.view === 'room' ? roomHTML() : '';
   if (S.view === 'home') { const i = $('#codeInput'); if (i) { i.value = keepCode; paintBoxes(); } }
+  if (kingSelection && $('#kingText')) { $('#kingText').focus(); $('#kingText').setSelectionRange(...kingSelection); }
   S.flicked = true;
   renderOverlay();
 }
@@ -393,6 +594,8 @@ function setData(d) {
   const sig = JSON.stringify([d.version, d.players, d.state]);
   const first = !S.data;
   S.data = d;
+  const kingKey = d.state?.king?.key || null;
+  if (S.kingDraft.key !== kingKey) S.kingDraft = { key: kingKey, text: '', numbers: [] };
   const n = d.state && d.state.notice;
   if (n && n.at !== S.lastNotice) {
     if (!first && S.lastNotice !== null) toast(noticeText(n));
@@ -404,11 +607,16 @@ function setData(d) {
 function noticeText(n) {
   const by = n.by === me() ? '你' : pname(n.by);
   switch (n.kind) {
+    case 'king_start': return n.ok ? '国王游戏开始' : '开局提议取消';
+    case 'king_redeal': return n.ok ? '重新发编号' : '发编号提议取消';
+    case 'king_skip': return n.ok ? '跳过当前命令' : '跳过提议取消';
     case 'switch_game': return n.ok ? (n.payload && n.payload.game ? `开始${gameName(n.payload.game)}` : '回到大厅了') : `${by}不同意，继续现在的`;
     case 'pause': return `${by}暂停了游戏`;
     case 'resume': return n.ok ? '继续游戏' : `${by}还不想继续`;
     case 'skip_player': return n.ok ? `这轮跳过了${pname(n.payload && n.payload.player)}` : `${by}不同意跳过`;
-    case 'restart_round': return n.ok ? (st().game === 'truth' ? '重新选玩法' : '这一轮重开了') : `${by}不同意`;
+    case 'bluff_redraw': return n.ok ? '换题了，重新看身份' : `${by}不同意换题`;
+    case 'bluff_void': return n.ok ? '这轮作废，不计分' : `${by}不同意作废`;
+    case 'restart_round': return n.ok ? (st().game === 'truth' ? '重新选玩法' : st().game === 'bluff' ? '回到设置' : '这一轮重开了') : `${by}不同意`;
     default: return '';
   }
 }
@@ -454,6 +662,10 @@ function tick() {
   const t = st().truth;
   if (t) document.querySelectorAll('[data-timer]').forEach(el => {
     const txt = timerText(t); el.textContent = txt; el.classList.toggle('up', txt === '时间到');
+  });
+  const bl = st().bluff;
+  if (bl) document.querySelectorAll('[data-btimer]').forEach(el => {
+    const txt = timerText(bl); el.textContent = txt; el.classList.toggle('up', txt === '时间到');
   });
 }
 
@@ -587,6 +799,12 @@ overlay.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target.id === 'renameInput') handle('rename-save');
   if (e.key === 'Enter' && e.target.id === 'newCode') handle('admin-create-go');
 });
+app.addEventListener('input', e => {
+  if (e.target.id === 'kingText') S.kingDraft.text = e.target.value;
+});
+app.addEventListener('change', e => {
+  if (e.target.id === 'kingPlayer') S.kingPlayer = e.target.value;
+});
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { S.menu = false; S.sheet = null; renderOverlay(); } });
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-act]');
@@ -656,6 +874,38 @@ async function handle(a, ds = {}, el) {
       case 't-skip': await act('t_done', { skipped: true }); break;
       case 't-back-dice': await act('t_back_dice'); break;
       case 't-restart': await act('propose', { kind: 'restart_round' }); break;
+      case 'k-start':
+        await act('propose', { kind: 'king_start', payload: { mode: ds.mode, player: $('#kingPlayer').value } }); break;
+      case 'k-num': {
+        const n = Number(ds.num), nums = S.kingDraft.numbers;
+        S.kingDraft.numbers = nums.includes(n) ? nums.filter(x => x !== n) : [...nums, n];
+        el.classList.toggle('on', S.kingDraft.numbers.includes(n));
+        el.setAttribute('aria-pressed', String(S.kingDraft.numbers.includes(n)));
+        break;
+      }
+      case 'k-publish':
+        await act('k_publish', { key: st().king.key, type: ds.type, numbers: S.kingDraft.numbers, text: S.kingDraft.text }); break;
+      case 'k-answer': await act('k_answer', { key: st().king.key }); break;
+      case 'k-result': await act('k_result', { key: st().king.key, result: ds.result }); break;
+      case 'k-next': await act('k_next', { key: st().king.key, player: ds.player }); break;
+      case 'k-skip': await act('propose', { kind: 'king_skip', payload: { key: st().king.key } }); break;
+      case 'k-redeal': await act('propose', { kind: 'king_redeal', payload: { key: st().king.key } }); break;
+      case 'k-restart': await act('propose', { kind: 'restart_round' }); break;
+      case 'b-mode': await act('b_setup', { mode: ds.mode }); break;
+      case 'b-score': await act('b_setup', { scoring: ds.on === '1' }); break;
+      case 'b-timer': await act('b_timer', { secs: +ds.secs }); break;
+      case 'b-start': await act('b_start'); break;
+      case 'b-want': await act('b_want', { yes: ds.yes === '1' }); break;
+      case 'b-seen': await act('b_seen'); break;
+      case 'b-next': await act('b_next'); break;
+      case 'b-skip': await act('b_skip_speak'); break;
+      case 'b-to-guess': S.bPick = null; await act('b_to_guess'); break;
+      case 'b-cand': S.bPick = ds.pid; S.sig = ''; render(); break;
+      case 'b-pick': if (S.bPick) { await act('b_pick', { player: S.bPick }); S.bPick = null; } break;
+      case 'b-next-round': await act('b_next_round'); break;
+      case 'b-redraw': await act('propose', { kind: 'bluff_redraw' }); break;
+      case 'b-void': await act('propose', { kind: 'bluff_void' }); break;
+      case 'b-restart': await act('propose', { kind: 'restart_round' }); break;
       case 'rename': S.sheet = { type: 'rename' }; renderOverlay(); setTimeout(() => { const i = $('#renameInput'); if (i) i.focus(); }, 50); break;
       case 'rename-save': {
         const n = ($('#renameInput').value || '').trim();
