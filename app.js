@@ -60,6 +60,13 @@ const pname = id => { const p = players().find(x => x.id === id); return p ? p.n
 const names = ids => ids.map(pname).join('、');
 const onlineIds = () => players().filter(p => p.online).map(p => p.id);
 const serverNow = () => Date.now() + S.offset;
+// 打过字之后重新加载一次页面再进房间：清掉 iPhone「摇动以撤销」的撤销记录，摇骰子时就不会弹「撤销键入」
+function cleanEnter(code) {
+  const u = new URL(location.href); u.hash = '';
+  u.searchParams.set('r', code);
+  try { (document.activeElement || {}).blur && document.activeElement.blur(); } catch (e) {}
+  location.replace(u.toString());
+}
 function roomLink(code) {
   const u = new URL(location.href); u.search = ''; u.hash = '';
   u.searchParams.set('r', code);
@@ -482,7 +489,7 @@ async function submitName() {
   const r = await A.join(S.code, n, null);
   if (!r.ok) { e.textContent = ERR[r.error] || '出错了'; if (r.error === 'not_found') goHome(ERR.not_found); return; }
   LS.set(NAME_KEY, n); LS.set(tokKey(S.code), r.token); S.token = r.token;
-  setData(r); startRoom(); A.bump(S.code);
+  cleanEnter(S.code);
 }
 
 // ---------- 摇骰子 ----------
@@ -596,7 +603,7 @@ async function handle(a, ds = {}, el) {
       case 'join': {
         const v = ($('#codeInput') || {}).value || '';
         if (!/^\d{6}$/.test(v)) { $('#homeErr').textContent = '房间号是 6 位数字'; break; }
-        await enterRoom(v); break;
+        cleanEnter(v); break;
       }
       case 'name-submit': await submitName(); break;
       case 'admin-create': S.sheet = { type: 'create' }; renderOverlay(); setTimeout(() => { const i = $('#newCode'); if (i) i.focus(); }, 50); break;
@@ -612,7 +619,7 @@ async function handle(a, ds = {}, el) {
         if (!r.ok) { toast(ERR[r.error] || '出错了'); break; }
         S.sheet = { type: 'rooms', rooms: r.rooms }; renderOverlay(); break;
       }
-      case 'enter': S.sheet = null; renderOverlay(); await enterRoom(ds.code); break;
+      case 'enter': S.sheet = null; renderOverlay(); cleanEnter(ds.code); break;
       case 'copy-code-link': toast(await copy(roomLink(ds.code)) ? '链接已复制' : '复制不了，长按房间号自己复制'); break;
       case 'copy-link': toast(await copy(roomLink(S.code)) ? '链接已复制' : '复制不了，长按地址自己复制'); break;
       case 'share': S.sheet = { type: 'share' }; renderOverlay(); break;
@@ -649,7 +656,7 @@ async function handle(a, ds = {}, el) {
         const n = ($('#renameInput').value || '').trim();
         const r = await A.rename(S.code, S.token, n);
         if (!r.ok) { toast(ERR[r.error] || '出错了'); break; }
-        LS.set(NAME_KEY, n); S.sheet = null; renderOverlay(); setData(r); A.bump(S.code); break;
+        LS.set(NAME_KEY, n); S.sheet = null; renderOverlay(); setData(r); A.bump(S.code); setTimeout(() => cleanEnter(S.code), 300); break;
       }
       case 'leave': S.sheet = { type: 'leave' }; renderOverlay(); break;
       case 'leave-yes': { await A.leave(S.code, S.token); A.bump(S.code); goHome(); break; }
