@@ -9,3 +9,5 @@
 !config.js
 !supabase_setup.sql
 .DS_Store
+!questions.js
+!题库.sql

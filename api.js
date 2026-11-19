@@ -7,7 +7,7 @@ const params = new URLSearchParams(location.search);
 const MOCK = params.has('mock') || !cfg.supabaseUrl || !cfg.supabaseAnonKey;
 const ONLINE_MS = 20000;
 const VOTE_MS = 20000;
-const GAMES_READY = ['dice'];
+const GAMES_READY = ['dice', 'truth'];
 
 // ---------- 正式版 ----------
 async function rpc(fn, args) {
@@ -28,7 +28,7 @@ async function rpc(fn, args) {
 }
 
 const real = {
-  createRoom: adminKey => rpc('ldc_create_room', { p_admin_key: adminKey }),
+  createRoom: (adminKey, code) => rpc('ldc_create_room', { p_admin_key: adminKey, p_code: code || null }),
   adminRooms: adminKey => rpc('ldc_admin_rooms', { p_admin_key: adminKey }),
   join: (code, name, token) => rpc('ldc_join', { p_code: code, p_name: name || '', p_token: token || '' }),
   act: (code, token, action, args) => rpc('ldc_act', { p_code: code, p_token: token, p_action: action, p_args: args || {} }),
@@ -62,14 +62,41 @@ function diceReveal(d) {
   const h = { round: d.round, results: d.results, askers, takers, all_same: same };
   return { ...d, phase: 'reveal', askers, takers, all_same: same, history: [h, ...(d.history || [])].slice(0, 10) };
 }
+// ---------- 真心话大冒险（对照 SQL 的 _ldc_truth_init / _ldc_t_doers / _ldc_t_can / _ldc_draw） ----------
+const truthInit = mode => ({ mode, phase: mode === 'dice' ? 'choose' : 'setup', order_kind: 'seat', order: [], turn: 0, lap: 1,
+  askers: [], takers: [], q: null, show_answer: false, verdict: null, timer: 0, timer_end: null, timer_left: null, last: null, count: 0 });
+const pick = arr => arr.length ? arr[Math.floor(Math.random() * arr.length)] : null;
+const shuffle = arr => { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const tDoers = t => t.mode === 'turns' && t.order.length ? [t.order[t.turn]] : t.mode === 'dice' ? (t.takers || []) : [];
+function tCan(t, online, kind, me) {
+  const a = (kind === 'chooser' && t.mode === 'dice' ? t.askers : tDoers(t)).filter(x => online.includes(x));
+  return a.length === 0 || a.includes(me);
+}
+function draw(db, st, type, cat, online) {
+  const Q = (window.LDC_QUESTIONS || []).filter(q => q.game === 'truth' && q.type === type && (!cat || q.cat === cat));
+  const cur = st.truth.q && st.truth.q.id, used = st.used_q || [];
+  const q = pick(Q.filter(x => x.id !== cur && !used.includes(x.id))) || pick(Q.filter(x => x.id !== cur));
+  if (!q) return null;
+  let others = online.filter(x => !tDoers(st.truth).includes(x)); if (!others.length) others = online;
+  const nm = id => (db.players.find(p => p.id === id) || {}).nickname;
+  let text = q.text, target = null;
+  if (text.includes('{TA}')) { target = pick(others); text = text.split('{TA}').join(nm(target) || 'TA'); }
+  if (text.includes('{某人}')) { const s = pick(others); text = text.split('{某人}').join(nm(s) || '旁边的人'); }
+  return { id: q.id, type: q.type, cat: q.cat, text, answer: q.answer, explain: q.explain, target };
+}
+
 function applyProposal(st, p, online) {
   st = { ...st };
-  const d = st.dice;
+  const d = st.dice, tr = st.truth;
   if (p.kind === 'switch_game') {
     st.game = p.payload.game ?? null; st.paused = false; delete st.paused_by;
     if (st.game === 'dice') st.dice = diceInit();
+    if (st.game === 'truth') st.truth = { ...truthInit('setup'), timer: (tr && tr.timer) || 0 };
   } else if (p.kind === 'resume') {
     st.paused = false; delete st.paused_by;
+    if (tr && typeof tr.timer_left === 'number') st.truth = { ...tr, timer_end: Date.now() + tr.timer_left, timer_left: null };
+  } else if (p.kind === 'restart_round' && st.game === 'truth') {
+    st.truth = { ...truthInit('setup'), timer: (tr && tr.timer) || 0 };
   } else if (p.kind === 'skip_player' && d) {
     const t = p.payload.player, results = { ...d.results }; delete results[t];
     st.dice = { ...d, participants: del(d.participants, t), results };
@@ -109,6 +136,10 @@ function view(db, room, me) {
     const mine = st.dice.results[me];
     st.dice.results = mine == null ? {} : { [me]: mine };
   }
+  if (st.truth && st.truth.q && !st.truth.show_answer) {
+    const q = { ...st.truth.q, has_answer: st.truth.q.answer != null }; delete q.answer; delete q.explain; st.truth.q = q;
+  }
+  delete st.used_q;
   return {
     ok: true, code: room.code, me, version: room.version, now: Date.now(),
     players: roomPlayers(db, room).filter(p => !p.left_at).map(p => ({ id: p.id, name: p.nickname, seat: p.seat, online: Date.now() - p.last_seen < ONLINE_MS })),
@@ -122,11 +153,15 @@ function commit(db, room, st) {
 
 const mock = {
   // 模拟模式：任何非空钥匙都算管理员
-  async createRoom(adminKey) {
+  async createRoom(adminKey, want) {
     await sleep(120);
     if (!adminKey) return { ok: false, error: 'forbidden' };
     const db = load();
-    let code; do { code = String(Math.floor(Math.random() * 1e6)).padStart(6, '0'); } while (db.rooms[code]);
+    let code = want ? String(want).trim() : '';
+    if (code) {
+      if (!/^\d{6}$/.test(code)) return { ok: false, error: 'bad_code' };
+      if (db.rooms[code]) return { ok: false, error: 'code_taken' };
+    } else do { code = String(Math.floor(Math.random() * 1e6)).padStart(6, '0'); } while (db.rooms[code]);
     db.rooms[code] = { id: uuid(), code, state: { game: null, paused: false }, version: 0, created_at: Date.now() };
     save(db);
     return { ok: true, code };
@@ -176,7 +211,7 @@ const mock = {
       else if (k === 'skip_player') {
         const t = a.payload?.player;
         if (st.game !== 'dice' || d?.phase !== 'rolling' || !d.participants.includes(t) || d.done.includes(t) || t === me) err = 'bad_target';
-      } else if (k === 'restart_round') { if (st.game !== 'dice') err = 'no_game'; }
+      } else if (k === 'restart_round') { if (!['dice', 'truth'].includes(st.game)) err = 'no_game'; }
       else err = 'bad_kind';
       if (!err) st.proposal = { id: rid(4), kind: k, payload: a.payload || {}, by: me, votes: { [me]: true }, deadline: now + VOTE_MS, at: now };
     } else if (action === 'vote') {
@@ -186,7 +221,10 @@ const mock = {
       else { delete st.proposal; st.notice = { kind: p.kind, ok: false, by: me, payload: p.payload, at: now }; }
     } else if (action === 'pause') {
       if (!st.game) err = 'no_game';
-      else if (!st.paused) { st.paused = true; st.paused_by = me; st.notice = { kind: 'pause', ok: true, by: me, at: now }; }
+      else if (!st.paused) {
+        st.paused = true; st.paused_by = me; st.notice = { kind: 'pause', ok: true, by: me, at: now };
+        if (st.truth && typeof st.truth.timer_end === 'number') { st.truth.timer_left = Math.max(st.truth.timer_end - now, 0); st.truth.timer_end = null; }
+      }
     } else if (['ready', 'unready', 'roll', 'next_round'].includes(action)) {
       if (st.game !== 'dice' || !d) err = 'no_game';
       else if (st.paused) err = 'paused';
@@ -198,6 +236,58 @@ const mock = {
         else if (d.done.includes(me)) { err = 'already'; res = { value: d.results[me] }; }
         else { const v = 1 + Math.floor(Math.random() * 6); d.results[me] = v; d.done = add(d.done, me); res = { value: v }; }
       } else if (action === 'next_round') { if (d.phase !== 'reveal') err = 'phase'; else st.dice = diceNewRound(d, online); }
+    } else if (action === 'to_truth') {
+      if (st.game !== 'dice' || !d || d.phase !== 'reveal' || d.all_same) err = 'phase';
+      else if (st.paused) err = 'paused';
+      else { st.game = 'truth'; st.truth = { ...truthInit('dice'), askers: d.askers, takers: d.takers, round: d.round, timer: (st.truth && st.truth.timer) || 0 }; }
+    } else if (action.startsWith('t_')) {
+      const t = st.truth;
+      if (st.game !== 'truth' || !t) err = 'no_game';
+      else if (st.paused) err = 'paused';
+      else if (action === 't_start') {
+        if (t.phase !== 'setup') err = 'phase';
+        else if (!['free', 'turns'].includes(a.mode)) err = 'bad_action';
+        else Object.assign(t, { mode: a.mode, order_kind: a.order || 'seat', turn: 0, lap: 1, phase: 'choose', order: a.order === 'random' ? shuffle(online) : online.slice() });
+      } else if (action === 't_draw') {
+        if (!['choose', 'question'].includes(t.phase)) err = 'phase';
+        else if (!['truth', 'dare', 'quiz'].includes(a.type)) err = 'bad_action';
+        else if (!tCan(t, online, 'chooser', me)) err = 'not_yours';
+        else {
+          const q = draw(db, st, a.type, a.cat || null, online);
+          if (!q) err = 'empty';
+          else {
+            Object.assign(t, { q, phase: 'question', show_answer: false, verdict: null, timer_left: null, timer_end: t.timer > 0 ? now + t.timer * 1000 : null });
+            st.used_q = [q.id, ...(st.used_q || [])].slice(0, 400);
+          }
+        }
+      } else if (action === 't_timer') {
+        const v = +a.secs || 0;
+        if (![0, 15, 30, 60, 120].includes(v)) err = 'bad_action';
+        else Object.assign(t, { timer: v, timer_left: null, timer_end: v > 0 && t.phase === 'question' ? now + v * 1000 : null });
+      } else if (action === 't_answer') {
+        if (t.phase !== 'question') err = 'phase'; else t.show_answer = true;
+      } else if (action === 't_verdict') {
+        if (t.phase !== 'question' || !t.q.target) err = 'phase';
+        else if (t.q.target !== me && online.includes(t.q.target)) err = 'not_yours';
+        else t.verdict = a.right ? 'right' : 'wrong';
+      } else if (action === 't_done') {
+        if (t.phase !== 'question') err = 'phase';
+        else if (!tCan(t, online, 'doer', me)) err = 'not_yours';
+        else {
+          Object.assign(t, { last: { text: t.q.text, skipped: !!a.skipped, verdict: t.verdict, who: tDoers(t) }, count: (t.count || 0) + 1,
+            q: null, show_answer: false, verdict: null, timer_end: null, timer_left: null });
+          if (t.mode === 'free') t.phase = 'choose';
+          else if (t.mode === 'dice') t.phase = 'done';
+          else {
+            if (t.turn + 1 >= t.order.length) Object.assign(t, { turn: 0, lap: (t.lap || 1) + 1, order: t.order_kind === 'random' ? shuffle(online) : online.slice() });
+            else t.turn += 1;
+            t.phase = 'choose';
+          }
+        }
+      } else if (action === 't_back_dice') {
+        if (t.mode !== 'dice') err = 'phase';
+        else { st.game = 'dice'; st.dice = diceNewRound(st.dice || diceInit(), online); }
+      } else err = 'bad_action';
     } else err = 'bad_action';
 
     st = settle(st, online);
@@ -256,6 +346,8 @@ function subscribe(code, onBump) {
   return () => { try { c.removeChannel(ch); } catch (e) {} delete channels[code]; };
 }
 function bump(code) { const ch = channels[code]; if (ch) try { ch.send(); } catch (e) {} }
+
+if (MOCK && !window.LDC_QUESTIONS) { const sc = document.createElement('script'); sc.src = 'questions.js'; document.head.appendChild(sc); }
 
 window.LdcApi = { MOCK, GAMES_READY, ...(MOCK ? mock : real), subscribe, bump, _mock: mock };
 })();

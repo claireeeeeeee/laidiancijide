@@ -192,3 +192,43 @@ body{min-height:100vh;min-height:100dvh;background:var(--bg-solid);background-im
 .sheet .big-code{font-size:56px;text-align:center;letter-spacing:.06em;line-height:1.1}
 .sheet p{font-size:15px;line-height:1.6;color:var(--muted)}
 .sheet .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+/* ---------- 真心话大冒险 ---------- */
+.g.wide{width:100%;min-height:84px}
+.g.wide h3{font-size:22px}
+.g.wide small{font-size:13px;margin-top:4px}
+.types{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.type{border-radius:var(--radius);border:1.5px solid var(--line);background:var(--surface);padding:16px 6px;font-size:20px;box-shadow:var(--shadow)}
+.type.on{border-color:var(--a2);border-width:2.5px}
+[data-skin="night"] .type.on{box-shadow:0 0 16px #3ee6e044}
+.type:disabled,.chip:disabled{opacity:.5}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.chip.on{background:var(--a2);color:var(--on-a2);border-color:var(--a2)}
+.timer-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:16px;font-size:13px;color:var(--muted)}
+.timer-row span{margin-right:4px}
+.timer-row .chip{font-size:13px;padding:6px 11px;color:var(--ink)}
+.timer-row .chip.on{color:var(--on-a2)}
+.qcard{border-radius:20px;background:var(--surface-solid);border:1.5px solid var(--line);padding:24px 20px;box-shadow:var(--shadow)}
+[data-skin="night"] .qcard{background:#120a1f;border-color:#ff4fa355;box-shadow:0 0 24px #ff4fa322}
+[data-skin="oc"] .qcard{border-color:#FF9A3C;box-shadow:6px 6px 0 #FF9A3C}
+.qcard p{font-size:24px;line-height:1.5;font-weight:700}
+.dim-card p{font-size:18px;font-weight:500;color:var(--muted)}
+.timer{margin-top:16px;font-size:34px;font-family:var(--disp);font-weight:var(--disp-w);color:var(--a2)}
+.timer.up{color:var(--a1)}
+[data-skin="sakura"] .timer.up{color:#e48fb5}
+.answer{border-radius:14px;background:var(--well);border:1px dashed var(--a2);padding:14px 16px;font-size:18px;line-height:1.5}
+.answer b{display:block;font-size:12px;color:var(--muted);font-weight:500;margin-bottom:2px}
+.answer small{display:block;font-size:14px;color:var(--muted);margin-top:4px}
+.sheet input#newCode{width:100%;font-size:18px;padding:14px;border-radius:12px;border:1.5px solid var(--line);background:var(--well);color:var(--ink)}
+
+/* ---------- 键盘弹出时（body.kb）：页面高度跟着可见区域走，标题缩小 ---------- */
+body.kb .app{min-height:var(--vvh,100dvh);height:var(--vvh,100dvh);overflow:auto}
+body.kb .home-title{margin-top:12px;font-size:40px}
+body.kb .home-sub{font-size:16px;margin-top:6px}
+body.kb .spark{display:none}
+body.kb .h-title{font-size:30px;margin-bottom:10px}
+body.kb .push{margin-top:16px}
+body.kb .sheet-bg{height:var(--vvh,100%);bottom:auto;top:0}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.row2:has(> span:first-child + span:last-child){display:none}
+.toast{top:calc(env(safe-area-inset-top) + 60px)}

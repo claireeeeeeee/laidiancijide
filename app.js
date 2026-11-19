@@ -27,13 +27,22 @@ const ERR = {
   bad_target: '现在不能跳过 TA', paused: '游戏暂停中', phase: '已经到下一步了', not_in_round: '这一轮你没参加，下一轮一起',
   already: '你已经摇过了', stale: '这个提议已经结束了', network: '网络不太好，再试一次', not_member: '你已经不在这个房间了',
   not_found: '没有这个房间，检查一下房间号', forbidden: '管理员钥匙不对', bad_name: '名字要 1 到 12 个字', full: '房间满了（最多 16 人）',
+  not_yours: '现在不是你来操作', empty: '这个分类没有题了', bad_code: '房间号要 6 位数字', code_taken: '这个房间号已经有了',
   not_installed: '服务器还没装好', server: '服务器出错了，再试一次', no_game: '现在没有在玩游戏', bad_kind: '操作不对', bad_action: '操作不对'
 };
+const TTYPES = [{ id: 'truth', name: '真心话', hl: 'hl1' }, { id: 'dare', name: '大冒险', hl: 'hl2' }, { id: 'quiz', name: '智力问答', hl: 'hl3' }];
+const TCATS = {
+  truth: ['感情隐私', '个人糗事', '友情关系', '秘密心事', '大胆提问'],
+  dare: ['搞怪表演', '社交挑战', '互动任务', '动作挑战', '随机整活'],
+  quiz: ['明星娱乐', '影视动漫', '生活常识', '脑筋急转弯', '逻辑推理', '朋友默契']
+};
+const TIMERS = [[0, '不限'], [15, '15 秒'], [30, '30 秒'], [60, '60 秒'], [120, '2 分钟']];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // ---------- 状态 ----------
 const S = {
   view: 'home', code: null, token: null, data: null, sig: '', offset: 0, lastNotice: null,
+  tType: 'truth', tCat: '',
   rolling: false, landed: false, menu: false, sheet: null, offline: false, flicked: false, motion: null
 };
 let unsub = null, pollTimer = null, tickTimer = null, inflight = false, bumpTimer = null;
@@ -130,7 +139,7 @@ function proposalHTML() {
   if (p.kind === 'switch_game') what = p.payload.game ? `想玩${gameName(p.payload.game)}` : '想回大厅';
   else if (p.kind === 'resume') what = '想继续';
   else if (p.kind === 'skip_player') what = `想跳过${esc(pname(p.payload.player))}`;
-  else if (p.kind === 'restart_round') what = '想重开这一轮';
+  else if (p.kind === 'restart_round') what = st().game === 'truth' ? '想换个玩法' : '想重开这一轮';
   const voted = !!p.votes[me()], mine = p.by === me();
   const btns = mine ? `<button class="no" data-act="vote" data-id="${p.id}" data-yes="0">撤回</button>`
     : voted ? '' : `<button class="yes" data-act="vote" data-id="${p.id}" data-yes="1">同意</button><button class="no" data-act="vote" data-id="${p.id}" data-yes="0">不了</button>`;
@@ -206,15 +215,101 @@ function diceHTML() {
       <p class="verdict">${verdict}</p>
       <div class="push stack">
         ${d.all_same ? '<button class="btn b1" data-act="next-round">再摇一轮</button>'
-          : '<button class="btn b1" data-act="pick" data-game="truth">去真心话大冒险</button><button class="btn b2" data-act="next-round">再摇一轮</button>'}
+          : '<button class="btn b1" data-act="to-truth">去真心话大冒险</button><button class="btn b2" data-act="next-round">再摇一轮</button>'}
       </div>`;
   }
   return '';
 }
+// ---------- 真心话大冒险 ----------
+const tDoers = t => t.mode === 'turns' && t.order.length ? [t.order[t.turn]] : t.mode === 'dice' ? (t.takers || []) : [];
+function tCan(t, kind) {
+  const on = onlineIds();
+  const a = (kind === 'chooser' && t.mode === 'dice' ? t.askers : tDoers(t)).filter(x => on.includes(x));
+  return a.length === 0 || a.includes(me());
+}
+const tActors = (t, kind) => (kind === 'chooser' && t.mode === 'dice' ? t.askers : tDoers(t));
+const typeName = id => (TTYPES.find(x => x.id === id) || {}).name || '';
+function timerText(t) {
+  if (typeof t.timer_left === 'number') return `${Math.ceil(t.timer_left / 1000)} 秒（暂停中）`;
+  if (typeof t.timer_end !== 'number') return '';
+  const left = t.timer_end - serverNow();
+  return left > 0 ? `${Math.ceil(left / 1000)} 秒` : '时间到';
+}
+function truthHTML() {
+  const t = st().truth || {}, my = me();
+  const youOr = ids => ids.length === 1 && ids[0] === my ? '你' : esc(names(ids));
+  if (t.phase === 'setup') {
+    return `
+      <div class="h-cap">真心话大冒险</div>
+      <h1 class="h-title disp">怎么玩</h1>
+      <div class="stack">
+        <button class="g wide" data-act="t-start" data-mode="free"><span class="k hl1">抽</span><h3>自由抽题<small>抽到什么，大家自己定谁来</small></h3></button>
+        <button class="g wide" data-act="t-start" data-mode="turns" data-order="seat"><span class="k hl2">轮</span><h3>轮流挑战<small>按进房间的顺序</small></h3></button>
+        <button class="g wide" data-act="t-start" data-mode="turns" data-order="random"><span class="k hl3">乱</span><h3>随机顺序轮流<small>每一圈重新打乱</small></h3></button>
+      </div>`;
+  }
+  if (t.phase === 'choose') {
+    const can = tCan(t, 'chooser');
+    const doers = tDoers(t), choosers = tActors(t, 'chooser');
+    const cap = t.mode === 'turns' ? `第 ${t.lap || 1} 圈` : t.mode === 'dice' ? `第 ${t.round} 轮骰子的惩罚` : '自由抽题';
+    const title = t.mode === 'turns' ? `轮到${youOr(doers)}` : t.mode === 'dice' ? `${youOr(doers)}接受挑战` : '抽一题';
+    const who = t.mode === 'dice' ? `${youOr(choosers)}来选题` : '';
+    const cats = TCATS[S.tType] || [];
+    return `
+      <div class="h-cap">${cap}</div>
+      <h1 class="h-title disp">${title}</h1>
+      ${who ? `<p class="note" style="text-align:left;margin:-8px 0 12px">${who}</p>` : ''}
+      <div class="types">${TTYPES.map(x => `<button class="type ${S.tType === x.id ? 'on' : ''}" data-act="t-type" data-type="${x.id}" ${can ? '' : 'disabled'}><span class="disp ${x.hl}">${x.name}</span></button>`).join('')}</div>
+      <div class="chips">${['', ...cats].map(c => `<button class="chip ${S.tCat === c ? 'on' : ''}" data-act="t-cat" data-cat="${esc(c)}" ${can ? '' : 'disabled'}>${c || '随机'}</button>`).join('')}</div>
+      <div class="timer-row"><span>计时</span>${TIMERS.map(([v, n]) => `<button class="chip ${(t.timer || 0) === v ? 'on' : ''}" data-act="t-timer" data-secs="${v}">${n}</button>`).join('')}</div>
+      <div class="push stack">
+        ${can ? '<button class="btn b1" data-act="t-draw">抽一题</button>' : `<p class="note">等${esc(names(choosers.filter(x => onlineIds().includes(x))))}选题</p>`}
+        ${t.mode !== 'dice' ? '<button class="link" data-act="t-restart">换个玩法</button>' : ''}
+      </div>`;
+  }
+  if (t.phase === 'question' && t.q) {
+    const q = t.q, canDo = tCan(t, 'doer'), canChoose = tCan(t, 'chooser'), doers = tDoers(t);
+    const tt = timerText(t);
+    let extra = '';
+    if (q.type === 'quiz' && q.has_answer && !t.show_answer) extra += '<button class="btn b3" data-act="t-answer">看答案</button>';
+    if (t.show_answer && q.answer) extra += `<div class="answer"><b>答案</b>${esc(q.answer)}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>`;
+    if (q.target) {
+      const targetOn = onlineIds().includes(q.target);
+      if (t.verdict) extra += `<div class="answer"><b>${esc(pname(q.target))}说</b>${t.verdict === 'right' ? '答对了' : '答错了'}</div>`;
+      else if (q.target === my || !targetOn) extra += `<p class="note">${q.target === my ? '你来判断' : `${esc(pname(q.target))}不在线，大家来判断`}</p><div class="row2"><button class="btn b3" data-act="t-verdict" data-right="1">答对了</button><button class="btn b3" data-act="t-verdict" data-right="0">答错了</button></div>`;
+      else extra += `<p class="note">由${esc(pname(q.target))}判断对不对</p>`;
+    }
+    return `
+      <div class="h-cap">${typeName(q.type)}，${esc(q.cat)}</div>
+      <h1 class="h-title disp">${doers.length ? `${youOr(doers)}${q.type === 'dare' ? '来挑战' : '来回答'}` : typeName(q.type)}</h1>
+      <div class="qcard"><p>${esc(q.text)}</p>${tt ? `<div class="timer" data-timer>${tt}</div>` : ''}</div>
+      <div class="stack" style="margin-top:14px">${extra}</div>
+      <div class="push stack" style="margin-top:16px">
+        ${canDo ? '<button class="btn b1" data-act="t-done">完成</button>' : `<p class="note">等${esc(names(doers))}完成</p>`}
+        <div class="row2">
+          ${canChoose ? '<button class="btn b3" data-act="t-redraw">换一题</button>' : '<span></span>'}
+          ${canDo ? '<button class="btn b3" data-act="t-skip">跳过</button>' : '<span></span>'}
+        </div>
+      </div>`;
+  }
+  if (t.phase === 'done') {
+    const l = t.last || {};
+    return `
+      <div class="h-cap">第 ${t.round} 轮骰子的惩罚</div>
+      <h1 class="h-title disp">${l.skipped ? '跳过了' : '挑战完成'}</h1>
+      ${l.text ? `<div class="qcard dim-card"><p>${esc(l.text)}</p></div>` : ''}
+      <div class="push stack">
+        <button class="btn b1" data-act="t-back-dice">再摇一轮</button>
+        <button class="btn b3" data-act="back-lobby">回大厅</button>
+      </div>`;
+  }
+  return '';
+}
+
 function roomHTML() {
   const s = st();
   const inGame = !!s.game;
-  const body = !inGame ? lobbyHTML() : s.game === 'dice' ? diceHTML() : '';
+  const body = !inGame ? lobbyHTML() : s.game === 'dice' ? diceHTML() : s.game === 'truth' ? truthHTML() : '';
   return `
   <div class="topbar">
     ${inGame ? '<button class="icon-btn" data-act="back-lobby">‹ 大厅</button>' : `<span class="st" style="font-size:13px;color:var(--muted)">${players().filter(p => p.online).length} 人在线</span>`}
@@ -243,6 +338,9 @@ function sheetHTML() {
     inner = `<h2>邀请朋友</h2><div class="big-code disp">${esc(S.code)}</div>
       ${qr ? `<div class="qr">${qr}</div>` : ''}<div class="url">${esc(roomLink(S.code))}</div>
       <button class="btn b1" data-act="copy-link">复制链接</button><button class="btn b3" data-act="close">关闭</button>`;
+  } else if (sh.type === 'create') {
+    inner = `<h2>创建房间</h2><input type="text" id="newCode" inputmode="numeric" maxlength="6" placeholder="想要的房间号，不填就随机">
+      <div class="row2"><button class="btn b3" data-act="close">取消</button><button class="btn b1" data-act="admin-create-go">创建</button></div>`;
   } else if (sh.type === 'created') {
     inner = `<h2>房间建好了</h2><div class="big-code disp">${esc(sh.code)}</div><p>把房间号或者链接发给朋友。你想玩也要点「进入」，和大家一样。</p>
       <div class="row2"><button class="btn b3" data-act="copy-code-link" data-code="${esc(sh.code)}">复制链接</button><button class="btn b1" data-act="enter" data-code="${esc(sh.code)}">进入</button></div>
@@ -281,6 +379,8 @@ function render() {
 // ---------- 房间数据 ----------
 function setData(d) {
   if (!d || !d.players) return false;
+  const tq = d.state && d.state.truth && d.state.truth.q;
+  if (tq) { S.tType = tq.type; }
   if (S.data && d.version < S.data.version) return false;
   S.offset = (d.now || Date.now()) - Date.now();
   const sig = JSON.stringify([d.version, d.players, d.state]);
@@ -301,15 +401,18 @@ function noticeText(n) {
     case 'pause': return `${by}暂停了游戏`;
     case 'resume': return n.ok ? '继续游戏' : `${by}还不想继续`;
     case 'skip_player': return n.ok ? `这轮跳过了${pname(n.payload && n.payload.player)}` : `${by}不同意跳过`;
-    case 'restart_round': return n.ok ? '这一轮重开了' : `${by}不同意重开`;
+    case 'restart_round': return n.ok ? (st().game === 'truth' ? '重新选玩法' : '这一轮重开了') : `${by}不同意`;
     default: return '';
   }
 }
+let pending = false;
 async function refresh() {
-  if (S.view !== 'room' || inflight || !S.code) return;
+  if (S.view !== 'room' || !S.code) return;
+  if (inflight) { pending = true; return; }       // 正在刷新时又收到通知：这次结束后再刷一次
   inflight = true;
   const r = await A.act(S.code, S.token, 'state', {});
   inflight = false;
+  if (pending) { pending = false; setTimeout(refresh, 0); }
   if (r && r.error === 'network') { if (!S.offline) { S.offline = true; render(); } return; }
   if (S.offline) { S.offline = false; S.sig = ''; }
   if (r && r.error === 'not_member') { LS.del(tokKey(S.code)); stopRoom(); S.view = 'name'; render(); return; }
@@ -341,6 +444,10 @@ function tick() {
     if (left < -300) expired = true;
   });
   if (expired) refresh();
+  const t = st().truth;
+  if (t) document.querySelectorAll('[data-timer]').forEach(el => {
+    const txt = timerText(t); el.textContent = txt; el.classList.toggle('up', txt === '时间到');
+  });
 }
 
 // ---------- 页面跳转 ----------
@@ -425,7 +532,10 @@ app.addEventListener('keydown', e => {
   if (e.target.id === 'codeInput') handle('join');
   if (e.target.id === 'nameInput') handle('name-submit');
 });
-overlay.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'renameInput') handle('rename-save'); });
+overlay.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.id === 'renameInput') handle('rename-save');
+  if (e.key === 'Enter' && e.target.id === 'newCode') handle('admin-create-go');
+});
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { S.menu = false; S.sheet = null; renderOverlay(); } });
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-act]');
@@ -450,8 +560,11 @@ async function handle(a, ds = {}, el) {
         await enterRoom(v); break;
       }
       case 'name-submit': await submitName(); break;
-      case 'admin-create': {
-        const r = await A.createRoom(LS.get(ADMIN_KEY));
+      case 'admin-create': S.sheet = { type: 'create' }; renderOverlay(); setTimeout(() => { const i = $('#newCode'); if (i) i.focus(); }, 50); break;
+      case 'admin-create-go': {
+        const want = (($('#newCode') || {}).value || '').trim();
+        if (want && !/^\d{6}$/.test(want)) { toast(ERR.bad_code); break; }
+        const r = await A.createRoom(LS.get(ADMIN_KEY), want);
         if (!r.ok) { toast(ERR[r.error] || '出错了'); if (r.error === 'forbidden') { LS.del(ADMIN_KEY); render(); } break; }
         S.sheet = { type: 'created', code: r.code }; renderOverlay(); break;
       }
@@ -479,6 +592,19 @@ async function handle(a, ds = {}, el) {
       case 'motion': await askMotion(); break;
       case 'next-round': S.landed = false; await act('next_round'); break;
       case 'skip': await act('propose', { kind: 'skip_player', payload: { player: ds.pid } }); break;
+      case 'to-truth': await act('to_truth'); break;
+      case 't-start': await act('t_start', { mode: ds.mode, order: ds.order || 'seat' }); break;
+      case 't-type': S.tType = ds.type; S.tCat = ''; S.sig = ''; render(); break;
+      case 't-cat': S.tCat = ds.cat || ''; S.sig = ''; render(); break;
+      case 't-timer': await act('t_timer', { secs: +ds.secs }); break;
+      case 't-draw': await act('t_draw', { type: S.tType, cat: S.tCat }); break;
+      case 't-redraw': { const q = (st().truth || {}).q; await act('t_draw', { type: q ? q.type : S.tType, cat: S.tCat && q && q.cat === S.tCat ? S.tCat : '' }); break; }
+      case 't-answer': await act('t_answer'); break;
+      case 't-verdict': await act('t_verdict', { right: ds.right === '1' }); break;
+      case 't-done': await act('t_done', { skipped: false }); break;
+      case 't-skip': await act('t_done', { skipped: true }); break;
+      case 't-back-dice': await act('t_back_dice'); break;
+      case 't-restart': await act('propose', { kind: 'restart_round' }); break;
       case 'rename': S.sheet = { type: 'rename' }; renderOverlay(); setTimeout(() => { const i = $('#renameInput'); if (i) i.focus(); }, 50); break;
       case 'rename-save': {
         const n = ($('#renameInput').value || '').trim();
@@ -494,6 +620,27 @@ async function handle(a, ds = {}, el) {
     if (el && el.isConnected) el.disabled = false;
   }
 }
+
+// ---------- 手机键盘：弹出时页面收紧，输入框和按钮留在键盘上方 ----------
+const vv = window.visualViewport;
+function fitViewport() {
+  const h = vv ? vv.height : window.innerHeight;
+  document.documentElement.style.setProperty('--vvh', h + 'px');
+  const el = document.activeElement;
+  const typing = el && el.tagName === 'INPUT';
+  const kb = typing && (vv ? window.innerHeight - vv.height > 120 || window.screen.height - vv.height > 260 : false);
+  document.body.classList.toggle('kb', !!(kb || (typing && 'ontouchstart' in window)));
+  if (typing) setTimeout(() => {
+    const target = el.closest('.sheet') || el.closest('.screen') || el;
+    const btn = target.querySelector('.btn.b1') || el;
+    window.scrollTo(0, 0);
+    btn.scrollIntoView({ block: 'end', behavior: 'smooth' });
+  }, 60);
+}
+if (vv) { vv.addEventListener('resize', fitViewport); vv.addEventListener('scroll', () => { if (document.body.classList.contains('kb')) fitViewport(); }); }
+window.addEventListener('resize', fitViewport);
+document.addEventListener('focusin', e => { if (e.target.tagName === 'INPUT') setTimeout(fitViewport, 250); });
+document.addEventListener('focusout', () => setTimeout(() => { if (!document.activeElement || document.activeElement.tagName !== 'INPUT') { document.body.classList.remove('kb'); document.documentElement.style.removeProperty('--vvh'); } }, 100));
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 window.addEventListener('online', refresh);
