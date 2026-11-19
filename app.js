@@ -173,17 +173,17 @@ function diceHTML() {
       <div class="list">${on.map(p => `<div class="row"><span class="who">${esc(p.name)}${p.id === my ? '（我）' : ''}</span>
         <span class="st ${(d.ready || []).includes(p.id) ? 'ok' : ''}">${(d.ready || []).includes(p.id) ? '准备好了' : '还没准备'}</span></div>`).join('')}</div>
       <p class="note">${on.length < 2 ? '至少 2 个人在线才能开始' : '在线的人都准备好就自动开始'}</p>
+      ${motionHTML('ready')}
       <div class="push stack">${iReady ? '<button class="btn b3" data-act="unready">取消准备</button>' : '<button class="btn b1" data-act="ready">准备好了</button>'}</div>`;
   }
   if (d.phase === 'rolling') {
     const inRound = (d.participants || []).includes(my), done = (d.done || []).includes(my);
     const mine = d.results && d.results[my];
-    const needPerm = typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function' && S.motion !== 'on';
     let top = '';
     if (!inRound) top = `<div class="die-stage">${dieHTML(6, 'blank')}</div><p class="note">这一轮你没参加，下一轮一起</p>`;
     else if (done && !S.rolling) top = `<div class="die-stage">${dieHTML(mine, S.landed ? 'landed' : '')}</div><p class="mine">你摇到了 <b>${mine}</b>，等其他人</p>`;
     else top = `<div class="die-stage">${dieHTML(S.rollFace || 6, S.rolling ? 'rolling' : '')}</div>
-      <p class="note">${S.motion === 'on' || (!needPerm && 'DeviceMotionEvent' in window) ? '摇一摇手机，或者点下面' : '点下面掷骰子'}</p>`;
+      <p class="note">${S.motion === 'on' ? '摇一摇手机，或者点下面' : '点下面掷骰子'}</p>${motionHTML('roll')}`;
     const rows = (d.participants || []).map(id => {
       const ok = (d.done || []).includes(id);
       const p = players().find(x => x.id === id);
@@ -197,7 +197,7 @@ function diceHTML() {
       ${top}
       <div class="list" style="margin-top:14px">${rows}</div>
       <div class="push stack" style="margin-top:16px">
-        ${inRound && !done ? `${needPerm ? '<button class="btn b2" data-act="motion">开启摇一摇</button>' : ''}<button class="btn b1" data-act="roll" ${S.rolling ? 'disabled' : ''}>掷骰子</button>` : ''}
+        ${inRound && !done ? `<button class="btn b1" data-act="roll" ${S.rolling ? 'disabled' : ''}>掷骰子</button>` : ''}
       </div>`;
   }
   if (d.phase === 'reveal') {
@@ -501,10 +501,16 @@ async function doRoll() {
   if (r && r.ok !== false) A.bump(S.code);
   if (navigator.vibrate && r && r.value) try { navigator.vibrate([20, 40, 20]); } catch (e) {}
 }
-// 摇晃检测：只是触发方式，点数由服务器决定
-let lastAcc = null, shakeHits = [], motionBound = false;
+// ---------- 摇一摇 ----------
+// 摇晃只是触发方式，点数由服务器决定。
+// S.motion：checking 检测中 / ask 第一次用、要问权限 / again 以前允许过（点任意按钮时悄悄重新开启）
+//          / denied 以前点了不允许 / on 已开启 / none 这台设备不能摇
+const MOTION_KEY = 'ldc_motion';
+const needsPermission = () => typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function';
+let lastAcc = null, shakeHits = [], motionBound = false, probeTimer = null;
 function onMotion(e) {
   const a = e.accelerationIncludingGravity; if (!a || a.x == null) return;
+  if (S.motion !== 'on') setMotion('on');
   if (lastAcc) {
     const delta = Math.abs(a.x - lastAcc.x) + Math.abs(a.y - lastAcc.y) + Math.abs(a.z - lastAcc.z);
     const now = Date.now();
@@ -512,13 +518,46 @@ function onMotion(e) {
   }
   lastAcc = { x: a.x, y: a.y, z: a.z };
 }
-function bindMotion() { if (motionBound || !('DeviceMotionEvent' in window)) return; window.addEventListener('devicemotion', onMotion); motionBound = true; }
-async function askMotion() {
-  try {
-    const r = await DeviceMotionEvent.requestPermission();
-    if (r === 'granted') { S.motion = 'on'; bindMotion(); toast('摇一摇已开启'); } else { S.motion = 'off'; toast('没开权限，点按钮也一样'); }
-  } catch (e) { S.motion = 'off'; toast('这台手机不支持摇一摇，点按钮就行'); }
+function setMotion(v) { if (S.motion === v) return; S.motion = v; if (S.view === 'room') { S.sig = ''; render(); } }
+// 开始监听，1.5 秒内收到传感器数据才算真的能用（电脑等没有传感器的设备收不到）
+function bindMotion() {
+  if (!('DeviceMotionEvent' in window)) { setMotion('none'); return; }
+  if (!motionBound) { window.addEventListener('devicemotion', onMotion); motionBound = true; }
+  clearTimeout(probeTimer);
+  probeTimer = setTimeout(() => { if (S.motion !== 'on') setMotion('none'); }, 1500);
+}
+function initMotion() {
+  if (!('DeviceMotionEvent' in window)) { S.motion = 'none'; return; }
+  if (!('ontouchstart' in window) && !(navigator.maxTouchPoints > 0)) { S.motion = 'none'; return; }   // 电脑没有动作传感器
+  if (!needsPermission()) { S.motion = 'checking'; bindMotion(); return; }       // 安卓等：不用问权限
+  const saved = LS.get(MOTION_KEY);
+  S.motion = saved === 'granted' ? 'again' : saved === 'denied' ? 'denied' : 'ask';
+}
+async function askMotion(silent) {
+  if (!needsPermission()) { bindMotion(); return; }
+  let r = 'denied';
+  try { r = await DeviceMotionEvent.requestPermission(); } catch (e) { r = 'error'; }
+  if (r === 'granted') {
+    LS.set(MOTION_KEY, 'granted'); S.motion = 'checking'; bindMotion();
+    if (!silent) toast('摇一摇已开启');
+  } else if (r === 'denied') {
+    LS.set(MOTION_KEY, 'denied'); setMotion('denied');
+    if (!silent) toast('没有开启，点「掷骰子」也一样');
+  } else if (!silent) toast('这次没打开，点「掷骰子」也一样');
   S.sig = ''; render();
+}
+// 以前允许过：用户点任何按钮时顺便重新开启（苹果要求必须在点击里请求，已允许过的不会再弹窗）
+document.addEventListener('click', () => { if (S.motion === 'again') askMotion(true); }, true);
+function motionHTML(where) {
+  const m = S.motion;
+  if (m === 'ask') return `<div class="perm"><h3>开启摇一摇</h3><p>第一次在这台手机上玩，需要允许网页读取手机的动作，只用来检测你有没有摇手机。</p>
+    <button class="btn b2" data-act="motion">允许摇一摇</button></div>`;
+  if (m === 'denied') return `<div class="perm"><h3>摇一摇没有开启</h3><p>之前选了不允许，这台手机暂时不能摇。直接点「掷骰子」效果一样。</p>
+    <button class="link" data-act="motion">再试一次</button></div>`;
+  if (m === 'again') return where === 'roll' ? `<p class="perm-ok">点一下屏幕，摇一摇就会打开</p>` : '';
+  if (m === 'on') return `<p class="perm-ok">✓ 摇一摇已开启</p>`;
+  if (m === 'none') return where === 'roll' ? `<p class="perm-ok">这台设备不能摇，点「掷骰子」就行</p>` : '';
+  return '';
 }
 
 // ---------- 事件 ----------
@@ -657,11 +696,11 @@ function readAdminHash() {
 window.addEventListener('hashchange', () => { if (readAdminHash() && S.view === 'home') render(); });
 (function boot() {
   readAdminHash();
-  if (!(typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function')) bindMotion();
+  initMotion();
   const r = Q.get('r');
   if (r && /^\d{6}$/.test(r)) enterRoom(r);
   else { S.view = 'home'; render(); }
 })();
 
-window.LdcApp = { S, handle, refresh };
+window.LdcApp = { S, handle, refresh, render, askMotion, setMotion };
 })();

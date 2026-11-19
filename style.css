@@ -232,3 +232,10 @@ body.kb .sheet-bg{height:var(--vvh,100%);bottom:auto;top:0}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .row2:has(> span:first-child + span:last-child){display:none}
 .toast{top:calc(env(safe-area-inset-top) + 60px)}
+
+/* ---------- 摇一摇权限说明 ---------- */
+.perm{border-radius:var(--radius);border:1.5px dashed var(--a2);background:var(--surface);padding:16px;display:grid;gap:10px;margin-top:14px}
+.perm h3{font-size:18px}
+.perm p{font-size:14px;line-height:1.6;color:var(--muted)}
+.perm .link{justify-self:start;padding:0}
+.perm-ok{font-size:13px;color:var(--muted);text-align:center;margin-top:8px}
