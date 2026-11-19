@@ -180,7 +180,6 @@ function diceHTML() {
       <div class="list">${on.map(p => `<div class="row"><span class="who">${esc(p.name)}${p.id === my ? '（我）' : ''}</span>
         <span class="st ${(d.ready || []).includes(p.id) ? 'ok' : ''}">${(d.ready || []).includes(p.id) ? '准备好了' : '还没准备'}</span></div>`).join('')}</div>
       <p class="note">${on.length < 2 ? '至少 2 个人在线才能开始' : '在线的人都准备好就自动开始'}</p>
-      ${motionHTML('ready')}
       <div class="push stack">${iReady ? '<button class="btn b3" data-act="unready">取消准备</button>' : '<button class="btn b1" data-act="ready">准备好了</button>'}</div>`;
   }
   if (d.phase === 'rolling') {
@@ -190,7 +189,7 @@ function diceHTML() {
     if (!inRound) top = `<div class="die-stage">${dieHTML(6, 'blank')}</div><p class="note">这一轮你没参加，下一轮一起</p>`;
     else if (done && !S.rolling) top = `<div class="die-stage">${dieHTML(mine, S.landed ? 'landed' : '')}</div><p class="mine">你摇到了 <b>${mine}</b>，等其他人</p>`;
     else top = `<div class="die-stage">${dieHTML(S.rollFace || 6, S.rolling ? 'rolling' : '')}</div>
-      <p class="note">${S.motion === 'on' ? '摇一摇手机，或者点下面' : '点下面掷骰子'}</p>${motionHTML('roll')}`;
+      <p class="note">${motionNote()}</p>`;
     const rows = (d.participants || []).map(id => {
       const ok = (d.done || []).includes(id);
       const p = players().find(x => x.id === id);
@@ -332,7 +331,8 @@ function roomHTML() {
       <h2 class="disp">暂停中</h2>
       <p class="note" style="margin:0">${esc(pname(s.paused_by))}暂停了</p>
       ${proposalHTML() || '<button class="btn b1" data-act="resume">继续</button>'}
-    </div></div>` : ''}`;
+    </div></div>` : ''}
+  ${motionModalHTML()}`;
 }
 
 // ---------- 弹层 ----------
@@ -547,24 +547,29 @@ async function askMotion(silent) {
   if (r === 'granted') {
     LS.set(MOTION_KEY, 'granted'); S.motion = 'checking'; bindMotion();
     if (!silent) toast('摇一摇已开启');
-  } else if (r === 'denied') {
-    LS.set(MOTION_KEY, 'denied'); setMotion('denied');
-    if (!silent) toast('没有开启，点「掷骰子」也一样');
-  } else if (!silent) toast('这次没打开，点「掷骰子」也一样');
+  } else {
+    if (r === 'denied') LS.set(MOTION_KEY, 'denied');
+    S.motion = 'denied';                       // 没开成也关掉弹窗，改用按钮掷骰
+  }
   S.sig = ''; render();
 }
 // 以前允许过：用户点任何按钮时顺便重新开启（苹果要求必须在点击里请求，已允许过的不会再弹窗）
 document.addEventListener('click', () => { if (S.motion === 'again') askMotion(true); }, true);
-function motionHTML(where) {
-  const m = S.motion;
-  if (m === 'ask') return `<div class="perm"><h3>开启摇一摇</h3><p>第一次在这台手机上玩，需要允许网页读取手机的动作，只用来检测你有没有摇手机。</p>
-    <button class="btn b2" data-act="motion">允许摇一摇</button></div>`;
-  if (m === 'denied') return `<div class="perm"><h3>摇一摇没有开启</h3><p>之前选了不允许，这台手机暂时不能摇。直接点「掷骰子」效果一样。</p>
-    <button class="link" data-act="motion">再试一次</button></div>`;
-  if (m === 'again') return where === 'roll' ? `<p class="perm-ok">点一下屏幕，摇一摇就会打开</p>` : '';
-  if (m === 'on') return `<p class="perm-ok">✓ 摇一摇已开启</p>`;
-  if (m === 'none') return where === 'roll' ? `<p class="perm-ok">这台设备不能摇，点「掷骰子」就行</p>` : '';
-  return '';
+// 第一次用：进入摇骰子时弹窗，点「允许」之前点不到后面的按钮
+function motionModalHTML() {
+  const s0 = st(), d = s0.dice || {};
+  if (S.motion !== 'ask' || s0.game !== 'dice' || s0.paused || !['ready', 'rolling'].includes(d.phase)) return '';
+  return `<div class="modal-bg" role="dialog" aria-modal="true" aria-labelledby="mTitle"><div class="modal">
+    <div class="modal-icon" aria-hidden="true">${dieHTML(5, 'mini').replace('id="die"', '')}</div>
+    <h2 id="mTitle" class="disp">开启摇一摇</h2>
+    <p>摇手机就能掷骰子</p>
+    <button class="btn b1" data-act="motion">允许</button>
+  </div></div>`;
+}
+function motionNote() {
+  if (S.motion === 'on' || S.motion === 'again' || S.motion === 'checking') return '摇一摇，或者点下面';
+  if (S.motion === 'denied') return '摇一摇没开，点下面掷骰子';
+  return '点下面掷骰子';
 }
 
 // ---------- 事件 ----------

@@ -239,3 +239,14 @@ body.kb .sheet-bg{height:var(--vvh,100%);bottom:auto;top:0}
 .perm p{font-size:14px;line-height:1.6;color:var(--muted)}
 .perm .link{justify-self:start;padding:0}
 .perm-ok{font-size:13px;color:var(--muted);text-align:center;margin-top:8px}
+
+/* ---------- 摇一摇弹窗（第一次用） ---------- */
+.modal-bg{position:fixed;inset:0;z-index:25;display:grid;place-items:center;padding:24px;background:#000a;backdrop-filter:blur(6px)}
+.modal{background:var(--surface-solid);border:1px solid var(--line);border-radius:24px;padding:28px 22px 22px;width:min(320px,100%);text-align:center;display:grid;gap:10px;justify-items:center;box-shadow:0 20px 50px #0006}
+[data-skin="night"] .modal{background:#2B1748;box-shadow:0 0 40px #ff4fa333}
+.modal h2{font-size:30px;line-height:1.1}
+.modal p{font-size:15px;color:var(--muted);margin-bottom:8px}
+.modal .btn{width:100%}
+.modal-icon{margin-bottom:4px}
+.die.mini{--s:64px;gap:2px;box-shadow:none}
+.perm,.perm-ok{display:none}
