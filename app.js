@@ -705,20 +705,10 @@ function readAdminHash() {
   setTimeout(() => toast('这个浏览器已经可以创建房间'), 300);
   return true;
 }
-// 【测试用，测完删】网址后面加 #reset-motion：忘掉「已允许摇一摇」，下次进摇骰子会重新弹窗
-function readResetMotion() {
-  if (location.hash !== '#reset-motion') return false;
-  LS.del(MOTION_KEY); initMotion();
-  history.replaceState(null, '', location.pathname + location.search);
-  setTimeout(() => toast('摇一摇已重置'), 300);
-  if (S.view === 'room') { S.sig = ''; render(); }
-  return true;
-}
-window.addEventListener('hashchange', () => { readResetMotion(); if (readAdminHash() && S.view === 'home') render(); });
+window.addEventListener('hashchange', () => { if (readAdminHash() && S.view === 'home') render(); });
 (function boot() {
   readAdminHash();
   initMotion();
-  readResetMotion();
   const r = Q.get('r');
   if (r && /^\d{6}$/.test(r)) enterRoom(r);
   else { S.view = 'home'; render(); }
