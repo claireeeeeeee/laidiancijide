@@ -30,7 +30,7 @@ const ERR = {
   not_yours: '现在不是你来操作', empty: '这个分类没有题了', bad_code: '房间号要 6 位数字', code_taken: '这个房间号已经有了',
   king_people: '至少两位玩家在线才能开始', king_numbers: '请选择有效的挑战号码', king_text: '命令要写 1 到 200 个字',
   king_offline: '有相关玩家离线，可以等 TA 回来或重新安排本轮',
-  need3: '至少 3 个人在线才能玩', not_installed: '服务器还没装好', server: '服务器出错了，再试一次', no_game: '现在没有在玩游戏', bad_kind: '操作不对', bad_action: '操作不对'
+  need3: '至少 3 个人在线才能玩', too_many: '瞎掰王最多 12 个人', finished: '预设的轮数已经玩完了', no_warns: '警告牌用完了', not_installed: '服务器还没装好', server: '服务器出错了，再试一次', no_game: '现在没有在玩游戏', bad_kind: '操作不对', bad_action: '操作不对'
 };
 const TTYPES = [{ id: 'truth', name: '真心话', hl: 'hl1' }, { id: 'dare', name: '大冒险', hl: 'hl2' }, { id: 'quiz', name: '智力问答', hl: 'hl3' }];
 const TCATS = {
@@ -391,53 +391,86 @@ function kingHTML() {
 }
 
 // ---------- 瞎掰王 ----------
-const BMODES = [{ id: 'knowledge', name: '知识瞎掰', sub: '只有老实人知道答案', hl: 'hl1' }, { id: 'story', name: '故事瞎掰', sub: '老实人讲真事', hl: 'hl2' }];
-const BTIMERS = [[60, '1 分钟'], [120, '2 分钟'], [180, '3 分钟']];
+// ---------- 瞎掰王 ----------
+const BANKS = [['mix', '综合随机'], ['idiom', '冷门成语'], ['word', '生僻词汇'], ['allusion', '历史典故'], ['story', '故事']];
+const BTHINK = [[30, '30 秒'], [60, '1 分钟'], [120, '2 分钟']];
+const BTIMERS = [[60, '60 秒'], [120, '2 分钟'], [180, '3 分钟'], [0, '不限时']];
+const BGUESS = [[0, '自动'], [1, '1 次'], [2, '2 次']];
+const BROUNDS = [[1, '单轮'], [3, '3 轮'], [5, '5 轮'], [8, '8 轮'], [0, '不限']];
+const bSecs = b => ([0, 60, 120, 180].includes(b.timer) ? b.timer : 180);
+const bThink = b => ([30, 60, 120].includes(b.think) ? b.think : 30);
+const autoWarns = n => (n <= 4 ? 0 : n <= 8 ? 1 : 2);
+const autoGuesses = n => (n <= 6 ? 1 : 2);
+const ROLE_NAME = { smart: '大聪明', honest: '老实人', bluffer: '捣蛋鬼' };
 // 瞎掰王题目可以带领域提示：「题目｜领域」，领域写在卡片上给大家看（有的是故意写错的）
 const qMain = t => String(t || '').split('｜')[0];
 const qHint = t => { const h = String(t || '').split('｜')[1]; return h ? `<span class="qhint">领域：${esc(h)}</span>` : ''; };
 const qBody = t => `${qHint(t)}<p>${esc(qMain(t))}</p>`;
-const BTHINK = [[30, '30 秒'], [60, '1 分钟'], [120, '2 分钟']];
-const bSecs = b => ([60, 120, 180].includes(b.timer) ? b.timer : 180);
-const bThink = b => ([30, 60, 120].includes(b.think) ? b.think : 60);
-const ROLE_NAME = { smart: '大聪明', honest: '老实人', bluffer: '瞎掰人' };
+
+// 规则卡：设置页默认展开；游戏中点底部「规则」打开
+function bluffRules(open, act) {
+  return `<div class="rules"><button class="rules-h" data-act="${act}">怎么玩<span>${open ? '收起' : '展开'}</span></button>${!open ? '' : `<div class="rules-b">
+    <p>一本正经地胡说八道，以假乱真。3–12 人。</p>
+    <p><b class="t-smart">大聪明</b>（1 人）不知道答案。选题、安排谁先说、可以发警告牌，最后找出唯一的老实人。身份大家都知道。</p>
+    <p><b class="t-honest">老实人</b>（1 人）唯一能看到正确解释的人。准备时间里记住，开始发言后手机上就看不到了。照真的说，可以用自己的话，但不能编。</p>
+    <p><b class="t-bluffer">捣蛋鬼</b>（其余的人）看不到答案，现场编一个像真的解释：意思、来历、背后的故事都可以编。</p>
+    <p><b>流程</b>报名当大聪明 → 看身份 → 大聪明二选一选题 → 准备 → 大聪明点人，每人解释一次，不能打断 → 指认 → 揭晓。</p>
+    <p><b>指认</b>3–6 人 1 次，7–12 人 2 次。第一次猜错只公布「TA 不是老实人」，再从剩下的人里猜一次。</p>
+    <p><b>警告牌</b>5–8 人 1 张，9–12 人 2 张，指认前发给怀疑在胡说的人，不能撤回。警告到捣蛋鬼：大聪明 +1；警告到老实人：大聪明 −3；被警告的人都 −1。本轮结束才结算。</p>
+    <p><b>计分</b>第一次就猜中：大聪明 +1（7 人以上 +2），老实人 +1。第二次猜中：各 +1。每猜错一次，被指的捣蛋鬼 +1。</p>
+  </div>`}</div>`;
+}
 function roleTip(role, mode) {
-  if (role === 'smart') return '听大家讲，找出唯一的老实人';
-  if (role === 'honest') return mode === 'knowledge' ? '思考时记住答案，发言时手机上看不到' : '讲一件真实发生过的事';
-  if (role === 'bluffer') return mode === 'knowledge' ? '你看不到答案，编一个像真的' : '编一个没发生过的事';
+  if (role === 'smart') return '不知道答案。选题、点人发言、发警告牌，最后找出唯一的老实人';
+  if (role === 'honest') return mode === 'knowledge' ? '只有你能看到正确解释。准备时间里记住，开始发言后就看不到了；照真的说，不能编' : '讲一件真实发生过的事，不能编';
+  if (role === 'bluffer') return mode === 'knowledge' ? '你看不到答案，现场编一个像真的解释' : '编一件没发生过、但听起来像真的事';
   return '这一轮你在旁边看';
 }
 function bluffScores(b) {
   const sc = b.scores || {}, ids = Object.keys(sc);
-  if (!b.scoring || !ids.length) return '';
+  if (!ids.length) return '';
   ids.sort((x, y) => sc[y] - sc[x]);
   return `<div class="h-cap" style="margin-top:18px">总分</div><div class="list">${ids.map(id => `<div class="row"><span class="who">${esc(pname(id))}${id === me() ? '（我）' : ''}</span><span class="n" style="font-size:26px;width:auto">${sc[id]}</span></div>`).join('')}</div>`;
 }
 function bluffMine(b) {
   const my = me(), role = b.smart === my ? 'smart' : (b.roles || {})[my];
   const q = b.q || {};
-  let html = `<p class="mine-role"><span class="rtag r-${role || 'none'}">${role ? '你是' + ROLE_NAME[role] : '你在旁边看'}</span>${role ? roleTip(role, b.mode) : ''}</p>`;
-  if (role === 'honest' && q.answer) html += `<div class="answer"><b>答案（只有你看得到）</b>${esc(q.answer)}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>`;
+  let html = `<p class="mine-role"><span class="rtag r-${role || 'none'}">${role ? '你是' + ROLE_NAME[role] : '你在旁边看'}</span></p>`;
+  if (role === 'honest' && q.answer) html += `<div class="answer"><b>正确解释（只有你看得到）</b>${esc(q.answer)}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>`;
   return html;
 }
+const roundText = b => `第 ${b.round}${b.rounds > 0 ? ' / ' + b.rounds : ''} 轮`;
+const warnTag = (b, id) => ((b.warned || []).includes(id) ? '<span class="wtag">警告</span>' : '');
+
 function bluffHTML() {
   const b = st().bluff || {}, my = me();
   const inRound = (b.players || []).includes(my), isSmart = b.smart === my;
+  const smartOff = !onlineIds().includes(b.smart), canSmart = isSmart || smartOff;
   const youOr = id => id === my ? '你' : esc(pname(id));
-  const links = (redraw) => `<div class="foot">${redraw ? '<button class="link" data-act="b-redraw">换题</button>' : ''}<button class="link" data-act="b-void">这轮作废</button></div>`;
+  const links = (redraw) => `<div class="foot"><button class="link" data-act="b-rules-top">规则</button>${redraw ? '<button class="link" data-act="b-redraw">换题</button>' : ''}<button class="link" data-act="b-void">这轮作废</button></div>`;
+  const rulesTop = S.bRulesTop ? bluffRules(true, 'b-rules-top') : '';
+  const q = b.q || {};
+
   if (b.phase === 'setup') {
     const on = onlineIds().length;
+    const chips = (list, cur, act) => list.map(([v, n]) => `<button class="chip ${cur === v ? 'on' : ''}" data-act="${act}" data-v="${v}">${n}</button>`).join('');
+    const gN = [1, 2].includes(b.guess_n) ? b.guess_n : autoGuesses(on);
+    const wN = b.warn_on !== false ? autoWarns(on) : 0;
     return `
       <div class="h-cap">瞎掰王</div>
       <h1 class="h-title disp">设置</h1>
-      <div class="bmodes">${BMODES.map(m => `<button class="type ${b.mode === m.id ? 'on' : ''}" data-act="b-mode" data-mode="${m.id}"><span class="disp ${m.hl}">${m.name}</span><small>${m.sub}</small></button>`).join('')}</div>
-      <div class="timer-row"><span>思考</span>${BTHINK.map(([v, n]) => `<button class="chip ${bThink(b) === v ? 'on' : ''}" data-act="b-think" data-secs="${v}">${n}</button>`).join('')}</div>
-      <div class="timer-row"><span>每人发言</span>${BTIMERS.map(([v, n]) => `<button class="chip ${bSecs(b) === v ? 'on' : ''}" data-act="b-timer" data-secs="${v}">${n}</button>`).join('')}</div>
-      <div class="timer-row"><span>计分</span><button class="chip ${b.scoring !== false ? 'on' : ''}" data-act="b-score" data-on="1">开</button><button class="chip ${b.scoring === false ? 'on' : ''}" data-act="b-score" data-on="0">关</button></div>
+      ${bluffRules(S.bRules !== false, 'b-rules')}
+      <div class="timer-row wrap"><span>题库</span>${chips(BANKS, b.bank || 'mix', 'b-bank')}</div>
+      <div class="timer-row"><span>准备</span>${chips(BTHINK, bThink(b), 'b-think')}</div>
+      <div class="timer-row wrap"><span>每人发言</span>${chips(BTIMERS, bSecs(b), 'b-timer')}</div>
+      <div class="timer-row"><span>警告牌</span>${chips([[1, '开'], [0, '关']], b.warn_on !== false ? 1 : 0, 'b-warnon')}</div>
+      <div class="timer-row"><span>指认</span>${chips(BGUESS, [1, 2].includes(b.guess_n) ? b.guess_n : 0, 'b-guessn')}</div>
+      <div class="timer-row wrap"><span>轮数</span>${chips(BROUNDS, [0, 1, 3, 5, 8].includes(b.rounds) ? b.rounds : 5, 'b-rounds')}</div>
+      <p class="note" style="text-align:left">现在 ${on} 人在线：警告牌 ${wN} 张，指认 ${gN} 次</p>
       ${bluffScores(b)}
       <div class="push stack">
-        ${on < 3 ? '<p class="note">至少 3 个人在线才能开始</p>' : ''}
-        <button class="btn b1" data-act="b-start" ${on < 3 ? 'disabled' : ''}>开始</button>
+        ${on < 3 ? '<p class="note">至少 3 个人在线才能开始</p>' : on > 12 ? '<p class="note">最多 12 个人</p>' : ''}
+        <button class="btn b1" data-act="b-start" ${on < 3 || on > 12 ? 'disabled' : ''}>开始</button>
       </div>`;
   }
   if (b.phase === 'recruit') {
@@ -445,10 +478,10 @@ function bluffHTML() {
     const rows = (b.players || []).map(id => `<div class="row"><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}</span>
       <span class="st ${want[id] === true ? 'ok' : ''}">${want[id] === true ? '想当' : want[id] === false ? '不当' : '还没选'}</span></div>`).join('');
     return `
-      <div class="h-cap">第 ${b.round} 轮，<span data-countdown="${b.deadline}">${Math.max(0, Math.ceil((b.deadline - serverNow()) / 1000))}</span> 秒</div>
+      <div class="h-cap">${roundText(b)}，<span data-countdown="${b.deadline}">${Math.max(0, Math.ceil((b.deadline - serverNow()) / 1000))}</span> 秒</div>
       <h1 class="h-title disp">谁当大聪明</h1>
+      <p class="tip">大聪明不知道答案，负责选题、点人发言、发警告牌，最后找出老实人。有人想当就从里面抽一个，没人想当就随机。</p>
       <div class="list">${rows}</div>
-      <p class="note">有人想当就从里面抽一个，没人想当就随机</p>
       <div class="push stack">${inRound ? `<div class="row2">
         <button class="btn ${want[my] === true ? 'b1' : 'b3'}" data-act="b-want" data-yes="1">我想当</button>
         <button class="btn ${want[my] === false ? 'b1' : 'b3'}" data-act="b-want" data-yes="0">这轮不当</button></div>` : '<p class="note">这一轮你在旁边看</p>'}</div>`;
@@ -458,29 +491,35 @@ function bluffHTML() {
     const seen = (b.seen || []).includes(my);
     const on = (b.players || []).filter(id => onlineIds().includes(id));
     return `
-      <div class="h-cap">第 ${b.round} 轮，大聪明是${youOr(b.smart)}</div>
+      ${rulesTop}
+      <div class="h-cap">${roundText(b)}，大聪明是${youOr(b.smart)}</div>
       <h1 class="h-title disp">你的身份</h1>
       <div class="rolecard r-${role || 'none'}"><div class="disp">${role ? ROLE_NAME[role] : '旁观'}</div><p>${roleTip(role, b.mode)}</p></div>
+      <p class="tip">大聪明的身份大家都知道；老实人和捣蛋鬼的身份保密，别说出来。本轮：警告牌 ${b.warns_left || 0} 张，指认 ${b.guesses || 1} 次。</p>
       <p class="note">${(b.seen || []).length}/${on.length} 已确认</p>
       <div class="push stack">${inRound && !seen ? '<button class="btn b1" data-act="b-seen">我知道了</button>' : '<p class="note">等其他人确认</p>'}</div>
       ${links(false)}`;
   }
   if (b.phase === 'choose') {
-    const can = isSmart || !onlineIds().includes(b.smart), ch = b.choices || [];
+    const ch = b.choices || [];
     if (S.bChoice && !ch.some(c => c.id === S.bChoice)) S.bChoice = null;
     if (!ch.length) return `
-      <div class="h-cap">第 ${b.round} 轮</div>
+      <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">题玩完了</h1>
-      <p class="note" style="text-align:left">这个房间已经玩过所有${b.mode === 'knowledge' ? '知识' : '故事'}题</p>
+      <p class="tip">这个房间已经玩过这个题库的所有题，换个题库再玩。</p>
       <div class="push stack"><button class="btn b1" data-act="b-void">这轮作废</button></div>`;
-    if (!can) return `
-      <div class="h-cap">第 ${b.round} 轮</div>
+    if (!canSmart) return `
+      ${rulesTop}
+      <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">${esc(pname(b.smart))}在选题</h1>
       ${bluffMine(b)}
+      <p class="tip">${roleTip((b.roles || {})[my], b.mode)}</p>
       ${links(false)}`;
     return `
-      <div class="h-cap">第 ${b.round} 轮，${b.mode === 'knowledge' ? '知识瞎掰' : '故事瞎掰'}</div>
+      ${rulesTop}
+      <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">选一道</h1>
+      <p class="tip">题目大家都能看到，只有老实人能看到解释。</p>
       <div class="choices">${ch.map(c => `<button class="qcard choice ${S.bChoice === c.id ? 'on' : ''}" data-act="b-choice" data-id="${esc(c.id)}"><small>${esc(c.cat || '')}</small>${qBody(c.text)}</button>`).join('')}</div>
       <div class="push stack" style="margin-top:14px">
         <button class="btn b1" data-act="b-choose" ${S.bChoice ? '' : 'disabled'}>${S.bChoice ? '就这道' : '先选一道'}</button>
@@ -488,61 +527,83 @@ function bluffHTML() {
       </div>
       ${links(false)}`;
   }
-  const q = b.q || {};
-  const qcard = `<div class="qcard">${qBody(q.text)}${b.phase === 'speak' && timerText(b) ? `<div class="timer" data-btimer>${timerText(b)}</div>` : ''}</div>`;
   if (b.phase === 'think') {
     const ready = (b.ready || []).includes(my);
     const on = (b.players || []).filter(id => onlineIds().includes(id));
-    const isHonest = (b.roles || {})[my] === 'honest';
+    const role = isSmart ? 'smart' : (b.roles || {})[my];
+    const tip = role === 'honest' ? (b.mode === 'knowledge' ? '<p class="tip warn">准备时间结束后就看不到解释了，现在记住。发言时照真的说，可以用自己的话。</p>' : '<p class="tip">想好要讲哪件真事。</p>')
+      : role === 'bluffer' ? `<p class="tip">${b.mode === 'knowledge' ? '想好怎么编：意思、来历、背后的故事、用在什么场合。' : '想好要编一件什么事，细节越具体越像真的。'}</p>`
+      : role === 'smart' ? '<p class="tip">想想等下先点谁、怎么分辨谁在胡说。</p>' : '';
     return `
-      <div class="h-cap">${b.mode === 'knowledge' ? '知识瞎掰' : '故事瞎掰'}，${esc(q.cat || '')}</div>
-      <h1 class="h-title disp">想一想</h1>
+      ${rulesTop}
+      <div class="h-cap">${roundText(b)}，${esc(q.cat || '')}</div>
+      <h1 class="h-title disp">准备</h1>
       <div class="qcard">${qBody(q.text)}<div class="timer" data-btimer>${timerText(b)}</div></div>
       ${bluffMine(b)}
-      ${isHonest && b.mode === 'knowledge' ? '<p class="note" style="text-align:left">开始发言后答案会收起来</p>' : ''}
-      <p class="note">发言顺序：${b.order.map(id => youOr(id)).join('、')}</p>
+      ${tip}
       <div class="push stack" style="margin-top:14px">
-        ${inRound && !ready ? '<button class="btn b1" data-act="b-ready">想好了</button>' : `<p class="note">${(b.ready || []).length}/${on.length} 想好了</p>`}
+        ${inRound && !ready ? '<button class="btn b1" data-act="b-ready">准备完成</button>' : `<p class="note">${(b.ready || []).length}/${on.length} 准备好了</p>`}
       </div>
       ${links(true)}`;
   }
+  // 警告牌区域：只给大聪明看
+  const warnBox = () => {
+    if (!isSmart || !(b.warns_left > 0)) return '';
+    const cands = (b.order || []).filter(id => !(b.warned || []).includes(id));
+    if (S.bWarn && !cands.includes(S.bWarn)) S.bWarn = null;
+    return `<div class="warnbox">
+      <div class="h-cap">警告牌 还剩 ${b.warns_left} 张</div>
+      <p class="tip">怀疑谁在胡说就发给 TA，不能撤回。警告到捣蛋鬼你 +1，警告到老实人你 −3；本轮结束才结算。</p>
+      <div class="chips">${cands.map(id => `<button class="chip ${S.bWarn === id ? 'on' : ''}" data-act="b-warn-pick" data-pid="${id}">${esc(pname(id))}</button>`).join('')}</div>
+      ${S.bWarn ? `<button class="btn b2" data-act="b-warn" style="margin-top:10px">给${esc(pname(S.bWarn))}发警告牌</button>` : ''}
+    </div>`;
+  };
   if (b.phase === 'speak') {
-    const cur = b.order[b.cur];
-    const rows = b.order.map((id, i) => `<div class="row ${i === b.cur ? 'cur' : ''}"><span class="n" style="font-size:22px;width:28px">${i + 1}</span><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}</span>
-      <span class="st ${i < b.cur ? 'ok' : ''}">${i < b.cur ? ((b.skipped || []).includes(id) ? '跳过了' : '说完了') : i === b.cur ? '正在说' : ''}</span></div>`).join('');
-    const offlineBoth = !onlineIds().includes(cur) && !onlineIds().includes(b.smart);
+    const cur = b.cur, spoken = b.spoken || [];
+    const rows = (b.order || []).map(id => {
+      const i = spoken.indexOf(id);
+      const stt = id === cur ? '正在说' : i >= 0 ? ((b.skipped || []).includes(id) ? '跳过了' : `第 ${i + 1} 个说完`) : '还没说';
+      return `<div class="row ${id === cur ? 'cur' : ''}"><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}${warnTag(b, id)}</span><span class="st ${i >= 0 ? 'ok' : ''}">${stt}</span></div>`;
+    }).join('');
+    const myRole = (b.roles || {})[my];
+    let head, act;
+    if (!cur) {
+      const left = (b.order || []).filter(id => !spoken.includes(id));
+      head = canSmart ? '点下一位' : `${esc(pname(b.smart))}在点下一位`;
+      act = canSmart ? `<p class="tip">每人解释一次，不能打断。点谁谁说。</p><div class="cands">${left.map(id => `<button class="cand" data-act="b-call" data-pid="${id}">${esc(pname(id))}${id === my ? '（我）' : ''}</button>`).join('')}</div>` : '';
+    } else {
+      head = `${youOr(cur)}来解释`;
+      const offlineBoth = !onlineIds().includes(cur) && smartOff;
+      act = cur === my
+        ? `<p class="tip">${myRole === 'honest' ? '照你记住的真解释说，可以用自己的话。' : '一本正经地编：意思、来历、背后的故事都可以。'}${bSecs(b) ? '时间到会自动结束。' : ''}</p><button class="btn b1" data-act="b-next">发言完成</button><button class="link" data-act="b-skip">不想说，跳过</button>`
+        : isSmart || offlineBoth ? '<button class="btn b2" data-act="b-next">TA 说完了</button>' : `<p class="note">等${esc(pname(cur))}说完，不要打断</p>`;
+    }
     return `
-      <div class="h-cap">${b.mode === 'knowledge' ? '知识瞎掰' : '故事瞎掰'}，${esc(q.cat || '')}</div>
-      <h1 class="h-title disp">${youOr(cur)}来说</h1>
-      ${qcard}
+      ${rulesTop}
+      <div class="h-cap">${roundText(b)}，${esc(q.cat || '')}</div>
+      <h1 class="h-title disp">${head}</h1>
+      <div class="qcard">${qBody(q.text)}${cur && timerText(b) ? `<div class="timer" data-btimer>${timerText(b)}</div>` : ''}</div>
       ${bluffMine(b)}
+      <div class="push stack" style="margin-top:12px">${act}</div>
       <div class="list" style="margin-top:12px">${rows}</div>
-      <div class="push stack" style="margin-top:14px">
-        ${cur === my ? '<button class="btn b1" data-act="b-next">说完了</button><button class="link" data-act="b-skip">不想说，跳过</button>'
-          : isSmart || offlineBoth ? '<button class="btn b2" data-act="b-next">下一位</button>' : `<p class="note">等${esc(pname(cur))}说完</p>`}
-      </div>
-      ${links(true)}`;
-  }
-  if (b.phase === 'ask') {
-    const smartOff = !onlineIds().includes(b.smart);
-    return `
-      <div class="h-cap">大家都说完了</div>
-      <h1 class="h-title disp">追问时间</h1>
-      ${qcard}
-      ${bluffMine(b)}
-      <div class="push stack" style="margin-top:14px">
-        ${isSmart || smartOff ? '<p class="note">想问谁就问谁，问完去猜</p><button class="btn b1" data-act="b-to-guess">去猜老实人</button>' : `<p class="note">${esc(pname(b.smart))}在追问</p>`}
-      </div>
+      ${warnBox()}
       ${links(true)}`;
   }
   if (b.phase === 'guess') {
-    const can = isSmart || !onlineIds().includes(b.smart);
-    if (S.bPick && !b.order.includes(S.bPick)) S.bPick = null;
+    const wrong = b.wrong || [];
+    const cands = (b.order || []).filter(id => !wrong.includes(id));
+    if (S.bPick && !cands.includes(S.bPick)) S.bPick = null;
+    const left = (b.guesses || 1) - wrong.length;
+    const wrongNote = wrong.length ? `<div class="answer"><b>指认错误</b>${wrong.map(id => esc(pname(id))).join('、')} 不是老实人</div>` : '';
     return `
+      ${rulesTop}
       <div class="h-cap">${esc(qMain(q.text))}</div>
-      <h1 class="h-title disp">${can ? '谁是老实人' : `${esc(pname(b.smart))}在猜`}</h1>
-      <div class="cands">${b.order.map(id => `<button class="cand ${S.bPick === id ? 'on' : ''}" data-act="b-cand" data-pid="${id}" ${can ? '' : 'disabled'}>${esc(pname(id))}${id === my ? '（我）' : ''}</button>`).join('')}</div>
-      <div class="push stack">${can ? `<button class="btn b1" data-act="b-pick" ${S.bPick ? '' : 'disabled'}>${S.bPick ? `确定是${esc(pname(S.bPick))}` : '先选一个人'}</button><p class="note">确定后不能改</p>` : ''}</div>
+      <h1 class="h-title disp">${canSmart ? '谁是老实人' : `${esc(pname(b.smart))}在指认`}</h1>
+      ${wrongNote}
+      <p class="tip">${left > 1 ? `有 ${left} 次机会。第一次猜错只公布 TA 不是老实人，再从剩下的人里猜。` : wrong.length ? '最后一次机会。' : '只有 1 次机会，确定后本轮结束。'}</p>
+      <div class="cands">${cands.map(id => `<button class="cand ${S.bPick === id ? 'on' : ''}" data-act="b-cand" data-pid="${id}" ${canSmart ? '' : 'disabled'}>${esc(pname(id))}${id === my ? '（我）' : ''}${warnTag(b, id)}</button>`).join('')}</div>
+      <div class="push stack">${canSmart ? `<button class="btn b1" data-act="b-pick" ${S.bPick ? '' : 'disabled'}>${S.bPick ? `确定是${esc(pname(S.bPick))}` : '先选一个人'}</button><p class="note">确定后不能改</p>` : ''}</div>
+      ${!wrong.length ? warnBox() : ''}
       ${links(false)}`;
   }
   if (b.phase === 'reveal') {
@@ -551,22 +612,41 @@ function bluffHTML() {
     const rows = ids.map(id => {
       const role = id === b.smart ? 'smart' : roles[id];
       const d = (b.delta || {})[id];
-      return `<div class="row"><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}${id === b.pick ? '<span class="st">（被选中）</span>' : ''}</span>
-        <span class="rtag r-${role}">${ROLE_NAME[role] || ''}</span>${d ? `<span class="st ok">+${d}</span>` : ''}</div>`;
+      const mark = (b.wrong || []).includes(id) ? '<span class="st">（被指错）</span>' : id === b.pick && b.correct ? '<span class="st">（被找到）</span>' : '';
+      return `<div class="row"><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}${mark}${warnTag(b, id)}</span>
+        <span class="rtag r-${role}">${ROLE_NAME[role] || ''}</span>${d ? `<span class="st ${d > 0 ? 'ok' : 'neg'}">${d > 0 ? '+' : ''}${d}</span>` : ''}</div>`;
     }).join('');
-    const title = b.void ? '这轮作废' : b.correct ? '猜中了' : '猜错了';
-    const sub = b.void ? '不计分' : `${youOr(b.smart)}选了${b.pick ? youOr(b.pick) : '—'}，老实人是${youOr(b.honest)}`;
+    const title = b.void ? '这轮作废' : b.correct ? '找到了' : '没找到';
+    const sub = b.void ? '不计分' : `${b.correct ? `${youOr(b.smart)}${(b.wrong || []).length ? '第二次' : ''}找到了老实人${youOr(b.honest)}` : `老实人是${youOr(b.honest)}`}${(b.warned || []).length ? `；警告牌发给了${b.warned.map(youOr).join('、')}` : ''}`;
+    const done = b.rounds > 0 && b.round >= b.rounds;
     return `
-      <div class="h-cap">第 ${b.round} 轮</div>
+      <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp ${b.void ? '' : b.correct ? 'hl1' : 'hl2'}">${title}</h1>
       <p class="note" style="text-align:left;margin:-8px 0 12px">${sub}</p>
-      <div class="list reveal">${rows}</div>
-      ${q.text ? `<div class="answer" style="margin-top:12px"><b>${esc(qMain(q.text))}</b>${q.answer ? esc(q.answer) : '老实人讲的是真事'}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>` : ''}
+      ${q.text ? `<div class="answer"><b>${esc(qMain(q.text))}</b>${q.answer ? esc(q.answer) : '老实人讲的是真事'}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>` : ''}
+      <div class="list reveal" style="margin-top:12px">${rows}</div>
       ${bluffScores(b)}
       <div class="push stack" style="margin-top:16px">
-        <button class="btn b1" data-act="b-next-round">下一轮</button>
+        ${done ? '<button class="btn b1" data-act="b-final">看最终排名</button>' : `<button class="btn b1" data-act="b-next-round">下一轮</button><button class="link" data-act="b-final">结束，看排名</button>`}
         <button class="link" data-act="b-restart">改设置</button>
       </div>`;
+  }
+  if (b.phase === 'final') {
+    const sc = b.scores || {}, stt = b.stats || {};
+    const ids = [...new Set([...Object.keys(sc), ...Object.keys(stt)])].sort((x, y) => (sc[y] || 0) - (sc[x] || 0));
+    let rank = 0, prev = null;
+    const rows = ids.map((id, i) => {
+      const s = stt[id] || {}, v = sc[id] || 0;
+      if (v !== prev) { rank = i + 1; prev = v; }
+      const rate = s.warn ? `${Math.round((s.warn_hit || 0) / s.warn * 100)}%` : '—';
+      return `<div class="frow"><div class="ftop"><span class="frank">${rank}</span><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}</span><span class="n">${v}</span></div>
+        <div class="fstat">大聪明 ${s.smart || 0} 次 · 找到老实人 ${s.found || 0} 次 · 老实人 ${s.honest || 0} 次 · 捣蛋鬼 ${s.bluffer || 0} 次 · 被指错 ${s.picked || 0} 次 · 警告命中 ${rate}</div></div>`;
+    }).join('');
+    return `
+      <div class="h-cap">共 ${b.round} 轮</div>
+      <h1 class="h-title disp hl1">最终排名</h1>
+      <div class="list">${rows || '<p class="note">还没有分数</p>'}</div>
+      <div class="push stack" style="margin-top:16px"><button class="btn b1" data-act="b-again">再来一局</button></div>`;
   }
   return '';
 }
@@ -967,10 +1047,19 @@ async function handle(a, ds = {}, el) {
       case 'k-skip': await act('propose', { kind: 'king_skip', payload: { key: st().king.key } }); break;
       case 'k-redeal': await act('propose', { kind: 'king_redeal', payload: { key: st().king.key } }); break;
       case 'k-restart': await act('propose', { kind: 'restart_round' }); break;
-      case 'b-mode': await act('b_setup', { mode: ds.mode }); break;
-      case 'b-score': await act('b_setup', { scoring: ds.on === '1' }); break;
-      case 'b-timer': await act('b_timer', { secs: +ds.secs }); break;
-      case 'b-think': await act('b_think', { secs: +ds.secs }); break;
+      case 'b-bank': await act('b_setup', { bank: ds.v }); break;
+      case 'b-warnon': await act('b_setup', { warn_on: ds.v === '1' }); break;
+      case 'b-guessn': await act('b_setup', { guess_n: +ds.v }); break;
+      case 'b-rounds': await act('b_setup', { rounds: +ds.v }); break;
+      case 'b-timer': await act('b_timer', { secs: +ds.v }); break;
+      case 'b-think': await act('b_think', { secs: +ds.v }); break;
+      case 'b-rules': S.bRules = S.bRules === false; S.sig = ''; render(); break;
+      case 'b-rules-top': S.bRulesTop = !S.bRulesTop; S.sig = ''; render(); if (S.bRulesTop) window.scrollTo(0, 0); break;
+      case 'b-call': await act('b_call', { player: ds.pid }); break;
+      case 'b-warn-pick': S.bWarn = S.bWarn === ds.pid ? null : ds.pid; S.sig = ''; render(); break;
+      case 'b-warn': if (S.bWarn) { await act('b_warn', { player: S.bWarn }); S.bWarn = null; } break;
+      case 'b-final': await act('b_final'); break;
+      case 'b-again': await act('b_again'); break;
       case 'b-ready': await act('b_ready'); break;
       case 'b-start': await act('b_start'); break;
       case 'b-want': await act('b_want', { yes: ds.yes === '1' }); break;
@@ -980,7 +1069,6 @@ async function handle(a, ds = {}, el) {
       case 'b-more': S.bChoice = null; await act('b_more'); break;
       case 'b-next': await act('b_next'); break;
       case 'b-skip': await act('b_skip_speak'); break;
-      case 'b-to-guess': S.bPick = null; await act('b_to_guess'); break;
       case 'b-cand': S.bPick = ds.pid; S.sig = ''; render(); break;
       case 'b-pick': if (S.bPick) { await act('b_pick', { player: S.bPick }); S.bPick = null; } break;
       case 'b-next-round': await act('b_next_round'); break;

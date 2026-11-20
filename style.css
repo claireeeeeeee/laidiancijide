@@ -291,3 +291,27 @@ textarea.king-field{resize:vertical}
 .ask.invite{border-color:var(--a2);position:sticky;top:calc(env(safe-area-inset-top) + 8px);z-index:12;margin-top:8px}
 [data-skin="night"] .ask.invite{box-shadow:0 0 18px #3ee6e044}
 .ask.invite .yes{background:var(--a2);color:var(--on-a2)}
+
+/* 瞎掰王：规则卡、阶段提示、警告牌、最终排名 */
+.rules{border-radius:16px;border:1.5px solid var(--line);background:var(--surface);margin:4px 0 6px;overflow:hidden}
+.rules-h{display:flex;justify-content:space-between;align-items:center;width:100%;padding:12px 16px;font-size:15px;font-weight:700;color:var(--ink);background:none;border:0}
+.rules-h span{font-size:13px;font-weight:500;color:var(--muted)}
+.rules-b{padding:0 16px 12px;font-size:14px;line-height:1.65;color:var(--ink)}
+.rules-b p{margin-top:6px}
+.rules-b b{margin-right:6px}
+.t-smart{color:var(--a3)} .t-honest{color:var(--a2)} .t-bluffer{color:var(--a1)}
+[data-skin="sakura"] .t-smart{color:#c2185b}
+.tip{font-size:14px;line-height:1.6;color:var(--muted);margin:10px 0 0}
+.tip.warn{color:var(--a1);font-weight:700}
+.wtag{display:inline-block;font-size:11px;font-weight:700;padding:1px 7px;border-radius:99px;background:var(--a1);color:var(--on-a1);margin-left:6px;vertical-align:2px}
+.warnbox{margin-top:16px;border-radius:16px;border:1.5px dashed var(--a1);padding:12px 14px}
+.warnbox .h-cap{margin:0}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.st.neg{color:var(--a1)}
+.frow{padding:12px 0;border-bottom:1px dashed var(--line)}
+.frow:last-child{border-bottom:0}
+.ftop{display:flex;align-items:center;gap:12px}
+.ftop .who{flex:1;font-weight:700}
+.ftop .n{font-size:26px}
+.frank{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:14px;font-weight:700;background:var(--a2);color:var(--well)}
+.fstat{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.5}

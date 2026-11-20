@@ -222,72 +222,82 @@ begin
 end $$;
 
 -- ---------- 瞎掰王 ----------
--- 阶段：setup 设置 → recruit 招募大聪明 → roles 看身份 → choose 大聪明二选一 → think 思考（老实人记答案） → speak 轮流发言（每人限时，到点自动下一位） → ask 追问 → guess 大聪明猜 → reveal 揭晓
+-- 阶段：setup 设置 → recruit 招募大聪明 → roles 看身份 → choose 大聪明二选一 → think 准备（老实人记答案）
+--       → speak 大聪明点人发言（可发警告牌） → guess 指认（1–2 次） → reveal 揭晓 → final 最终排名
+-- 题库 bank：idiom 冷门成语 / word 生僻词汇 / allusion 历史典故 / mix 综合随机（以上三类） / story 故事
 create or replace function public._ldc_bluff_init() returns jsonb
 language sql immutable as $$
-  select jsonb_build_object('phase', 'setup', 'mode', 'knowledge', 'timer', 180, 'think', 60, 'ready', '[]'::jsonb, 'scoring', true, 'round', 0,
+  select jsonb_build_object('phase', 'setup', 'bank', 'mix', 'mode', 'knowledge', 'think', 30, 'timer', 180,
+    'warn_on', true, 'guess_n', 0, 'rounds', 5, 'round', 0,
     'players', '[]'::jsonb, 'want', '{}'::jsonb, 'deadline', null, 'smart', null, 'volunteered', false,
-    'roles', '{}'::jsonb, 'seen', '[]'::jsonb, 'q', null, 'choices', '[]'::jsonb, 'order', '[]'::jsonb, 'cur', 0, 'skipped', '[]'::jsonb,
-    'pick', null, 'correct', null, 'void', false, 'honest', null, 'delta', '{}'::jsonb, 'scores', '{}'::jsonb,
-    'timer_end', null, 'timer_left', null, 'history', '[]'::jsonb) $$;
+    'roles', '{}'::jsonb, 'seen', '[]'::jsonb, 'choices', '[]'::jsonb, 'q', null, 'ready', '[]'::jsonb,
+    'order', '[]'::jsonb, 'spoken', '[]'::jsonb, 'cur', null, 'skipped', '[]'::jsonb,
+    'warned', '[]'::jsonb, 'warns_left', 0, 'guesses', 1, 'wrong', '[]'::jsonb,
+    'pick', null, 'correct', null, 'void', false, 'honest', null, 'delta', '{}'::jsonb,
+    'scores', '{}'::jsonb, 'stats', '{}'::jsonb, 'timer_end', null, 'timer_left', null, 'history', '[]'::jsonb) $$;
+
+-- 一轮里要清空的字段
+create or replace function public._ldc_bluff_fresh() returns jsonb
+language sql immutable as $$
+  select jsonb_build_object('roles', '{}'::jsonb, 'seen', '[]'::jsonb, 'choices', '[]'::jsonb, 'q', null, 'ready', '[]'::jsonb,
+    'order', '[]'::jsonb, 'spoken', '[]'::jsonb, 'cur', null, 'skipped', '[]'::jsonb, 'warned', '[]'::jsonb, 'wrong', '[]'::jsonb,
+    'pick', null, 'correct', null, 'void', false, 'honest', null, 'delta', '{}'::jsonb, 'timer_end', null, 'timer_left', null) $$;
 
 -- 新一轮：从招募大聪明开始（分数、设置、历史保留）
 create or replace function public._ldc_bluff_recruit(b jsonb, online jsonb) returns jsonb
 language sql volatile as $$
-  select b || jsonb_build_object('phase', 'recruit', 'round', coalesce((b->>'round')::int, 0) + 1, 'players', online,
-    'want', '{}'::jsonb, 'deadline', public._ldc_now_ms() + 20000, 'smart', null, 'volunteered', false,
-    'roles', '{}'::jsonb, 'seen', '[]'::jsonb, 'q', null, 'choices', '[]'::jsonb, 'ready', '[]'::jsonb, 'order', '[]'::jsonb, 'cur', 0, 'skipped', '[]'::jsonb,
-    'pick', null, 'correct', null, 'void', false, 'honest', null, 'delta', '{}'::jsonb, 'timer_end', null, 'timer_left', null) $$;
+  select b || public._ldc_bluff_fresh() || jsonb_build_object('phase', 'recruit', 'round', coalesce((b->>'round')::int, 0) + 1,
+    'players', online, 'want', '{}'::jsonb, 'deadline', public._ldc_now_ms() + 20000, 'smart', null, 'volunteered', false) $$;
 
--- 分身份：大聪明以外随机一个老实人，其余都是瞎掰人
+-- 分身份：大聪明以外随机一个老实人，其余都是捣蛋鬼；按人数定警告牌和指认次数
 create or replace function public._ldc_bluff_assign(b jsonb) returns jsonb
 language plpgsql volatile as $$
 declare others jsonb := public._ldc_minus(b->'players', jsonb_build_array(b->>'smart')); h text := public._ldc_pick(others);
+        n int := jsonb_array_length(b->'players');
 begin
-  return b || jsonb_build_object('phase', 'roles',
+  return b || public._ldc_bluff_fresh() || jsonb_build_object('phase', 'roles',
     'roles', (select coalesce(jsonb_object_agg(p, case when p = h then 'honest' else 'bluffer' end), '{}'::jsonb) from jsonb_array_elements_text(others) p),
-    'seen', '[]'::jsonb, 'q', null, 'choices', '[]'::jsonb, 'ready', '[]'::jsonb, 'order', '[]'::jsonb, 'cur', 0, 'skipped', '[]'::jsonb, 'pick', null, 'timer_end', null, 'timer_left', null);
+    'order', public._ldc_shuffle(others),
+    'warns_left', case when coalesce((b->>'warn_on')::boolean, true) then (case when n <= 4 then 0 when n <= 8 then 1 else 2 end) else 0 end,
+    'guesses', case when (b->>'guess_n') in ('1', '2') then (b->>'guess_n')::int when n <= 6 then 1 else 2 end);
 end $$;
 
 create or replace function public._ldc_bluff_draw(st jsonb) returns jsonb
-language plpgsql volatile as $$
-declare q public.ldc_questions; m text := st->'bluff'->>'mode';
-begin
-  select * into q from public.ldc_questions where enabled and game_type = 'bluff' and qtype = m
-    and not (coalesce(st->'used_q', '[]'::jsonb) ? id) order by random() limit 1;
-  if not found then
-    select * into q from public.ldc_questions where enabled and game_type = 'bluff' and qtype = m order by random() limit 1;
-  end if;
-  if not found then return null; end if;
-  return jsonb_build_object('id', q.id, 'cat', q.category, 'text', q.content, 'answer', q.answer, 'explain', q.explanation);
-end $$;
+language sql volatile as $$ select null::jsonb $$;   -- 旧函数，已不用
 
 -- 给大聪明的两道候选题（只有题目，不带答案）。这个房间玩过的题（used_q）不再出；p_not 里的（上一批）排最后
 create or replace function public._ldc_bluff_two(st jsonb, p_not jsonb) returns jsonb
 language sql volatile as $$
   select coalesce(jsonb_agg(jsonb_build_object('id', id, 'cat', category, 'text', content)), '[]'::jsonb) from (
-    select id, category, content from public.ldc_questions where enabled and game_type = 'bluff' and qtype = st->'bluff'->>'mode'
+    select id, category, content from public.ldc_questions, (select coalesce(st->'bluff'->>'bank', 'mix') as bk) k
+    where enabled and game_type = 'bluff'
+      and ((k.bk = 'story' and qtype = 'story')
+        or (k.bk <> 'story' and qtype = 'knowledge' and (k.bk = 'mix' or category =
+              case k.bk when 'idiom' then '冷门成语' when 'word' then '冷门词汇' when 'allusion' then '历史典故' end)))
       and not (coalesce(st->'used_q', '[]'::jsonb) ? id)
     order by coalesce(p_not, '[]'::jsonb) ? id, random() limit 2) z $$;
 
--- 每人发言秒数（只有 1/2/3 分钟，旧房间的「不限」按 3 分钟）
+-- 每人发言秒数：1/2/3 分钟或 0 = 不限时（默认 3 分钟）
 create or replace function public._ldc_bluff_secs(b jsonb) returns int
 language sql immutable as $$
-  select case when (b->>'timer') in ('60', '120', '180') then (b->>'timer')::int else 180 end $$;
+  select case when (b->>'timer') in ('0', '60', '120', '180') then (b->>'timer')::int else 180 end $$;
 
--- 思考秒数（30 秒 / 1 分钟 / 2 分钟，默认 1 分钟）
+-- 准备秒数（30 秒 / 1 分钟 / 2 分钟，默认 30 秒）
 create or replace function public._ldc_bluff_think(b jsonb) returns int
 language sql immutable as $$
-  select case when (b->>'think') in ('30', '60', '120') then (b->>'think')::int else 60 end $$;
+  select case when (b->>'think') in ('30', '60', '120') then (b->>'think')::int else 30 end $$;
 
--- 换下一位发言（最后一位说完进入追问）
+-- 当前发言的人说完了：记进已发言，等大聪明点下一位；全部说完进入指认
 create or replace function public._ldc_bluff_step(b jsonb, now_ms bigint) returns jsonb
-language sql volatile as $$
-  select case when (b->>'cur')::int + 1 >= jsonb_array_length(b->'order')
-    then b || jsonb_build_object('phase', 'ask', 'cur', jsonb_array_length(b->'order'), 'timer_end', null, 'timer_left', null)
-    else b || jsonb_build_object('cur', (b->>'cur')::int + 1, 'timer_left', null, 'timer_end', now_ms + public._ldc_bluff_secs(b) * 1000) end $$;
+language plpgsql volatile as $$
+declare sp jsonb := public._ldc_add(coalesce(b->'spoken', '[]'::jsonb), b->>'cur');
+begin
+  b := b || jsonb_build_object('spoken', sp, 'cur', null, 'timer_end', null, 'timer_left', null);
+  if public._ldc_subset(b->'order', sp) then b := b || '{"phase":"guess"}'::jsonb; end if;
+  return b;
+end $$;
 
--- 大聪明选好的题：进入思考时间，记进已出过的题
+-- 大聪明选好的题：进入准备时间，记进已出过的题
 create or replace function public._ldc_bluff_begin(st jsonb, p_id text) returns jsonb
 language plpgsql volatile as $$
 declare q public.ldc_questions; b jsonb := st->'bluff'; now_ms bigint := public._ldc_now_ms();
@@ -295,40 +305,73 @@ begin
   select * into q from public.ldc_questions where id = p_id and game_type = 'bluff';
   if not found then return st; end if;
   b := b || jsonb_build_object('q', jsonb_build_object('id', q.id, 'cat', q.category, 'text', q.content, 'answer', q.answer, 'explain', q.explanation),
-         'choices', '[]'::jsonb, 'phase', 'think', 'ready', '[]'::jsonb, 'cur', 0, 'skipped', '[]'::jsonb, 'timer_left', null,
-         'order', public._ldc_shuffle(public._ldc_minus(b->'players', jsonb_build_array(b->>'smart'))),
-         'timer_end', now_ms + public._ldc_bluff_think(b) * 1000);
+         'choices', '[]'::jsonb, 'phase', 'think', 'ready', '[]'::jsonb, 'spoken', '[]'::jsonb, 'cur', null, 'skipped', '[]'::jsonb,
+         'timer_left', null, 'timer_end', now_ms + public._ldc_bluff_think(b) * 1000);
   st := st || jsonb_build_object('used_q', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb) from
           jsonb_array_elements(jsonb_build_array(q.id) || coalesce(st->'used_q', '[]'::jsonb)) with ordinality z(x, i) where i <= 400));
   return jsonb_set(st, '{bluff}', b);
 end $$;
 
--- 结束一轮：p_pick = 大聪明选的人；p_void = 这轮作废（不计分）
+create or replace function public._ldc_inc(m jsonb, k text, v int) returns jsonb
+language sql immutable as $$ select coalesce(m, '{}'::jsonb) || jsonb_build_object(k, coalesce((m->>k)::int, 0) + v) $$;
+
+-- 加一项统计：stats = {玩家: {smart, found, honest, bluffer, picked, warn, warn_hit}}
+create or replace function public._ldc_stat(s jsonb, p text, k text, v int) returns jsonb
+language sql immutable as $$ select coalesce(s, '{}'::jsonb) || jsonb_build_object(p, public._ldc_inc(coalesce(s->p, '{}'::jsonb), k, v)) $$;
+
+-- 结束一轮：p_pick = 最后一次指认的人（作废时为 null）
+-- 计分：第一次指认对 3–6 人 大聪明 +1 / 7–12 人 +2，老实人 +1；第二次对 大聪明 +1、老实人 +1；
+--       每次指错，被指的捣蛋鬼 +1；警告捣蛋鬼 大聪明 +1、被警告 −1；警告老实人 大聪明 −3、被警告 −1
 create or replace function public._ldc_bluff_finish(b jsonb, p_pick text, p_void boolean) returns jsonb
 language plpgsql immutable as $$
-declare honest text; ok boolean; delta jsonb := '{}'::jsonb; sc jsonb := coalesce(b->'scores', '{}'::jsonb);
+declare honest text; ok boolean; d jsonb := '{}'::jsonb; sc jsonb := coalesce(b->'scores', '{}'::jsonb); st jsonb := coalesce(b->'stats', '{}'::jsonb);
+        wrong jsonb := coalesce(b->'wrong', '[]'::jsonb); sm text := b->>'smart'; n int := jsonb_array_length(b->'players'); w text; is_first boolean;
 begin
   select key into honest from jsonb_each_text(coalesce(b->'roles', '{}'::jsonb)) where value = 'honest' limit 1;
   ok := (not p_void) and p_pick is not null and p_pick = honest;
-  if not p_void and coalesce((b->>'scoring')::boolean, true) and p_pick is not null then
-    if ok then delta := jsonb_build_object(b->>'smart', 2) || jsonb_build_object(honest, 2);
-    else delta := jsonb_build_object(p_pick, 2); end if;
-    sc := sc || coalesce((select jsonb_object_agg(k, coalesce((sc->>k)::int, 0) + (delta->>k)::int) from jsonb_object_keys(delta) k), '{}'::jsonb);
+  is_first := jsonb_array_length(wrong) = 0;
+  if not p_void then
+    if p_pick is not null and not ok then wrong := wrong || to_jsonb(p_pick); end if;
+    for w in select jsonb_array_elements_text(wrong) loop
+      d := public._ldc_inc(d, w, 1); st := public._ldc_stat(st, w, 'picked', 1);
+    end loop;
+    if ok then
+      d := public._ldc_inc(d, sm, case when is_first and n >= 7 then 2 else 1 end);
+      d := public._ldc_inc(d, honest, 1);
+      st := public._ldc_stat(st, sm, 'found', 1);
+    end if;
+    for w in select jsonb_array_elements_text(coalesce(b->'warned', '[]'::jsonb)) loop
+      d := public._ldc_inc(d, w, -1);
+      d := public._ldc_inc(d, sm, case when w = honest then -3 else 1 end);
+      st := public._ldc_stat(st, sm, 'warn', 1);
+      if w <> honest then st := public._ldc_stat(st, sm, 'warn_hit', 1); end if;
+    end loop;
+    st := public._ldc_stat(st, sm, 'smart', 1);
+    if honest is not null then st := public._ldc_stat(st, honest, 'honest', 1); end if;
+    for w in select key from jsonb_each_text(coalesce(b->'roles', '{}'::jsonb)) where value = 'bluffer' loop
+      st := public._ldc_stat(st, w, 'bluffer', 1);
+    end loop;
+    sc := sc || coalesce((select jsonb_object_agg(k, coalesce((sc->>k)::int, 0) + (d->>k)::int) from jsonb_object_keys(d) k), '{}'::jsonb);
   end if;
-  return b || jsonb_build_object('phase', 'reveal', 'pick', p_pick, 'correct', ok, 'void', p_void, 'honest', honest,
-    'delta', delta, 'scores', sc, 'timer_end', null, 'timer_left', null,
+  return b || jsonb_build_object('phase', 'reveal', 'pick', p_pick, 'correct', ok, 'void', p_void, 'honest', honest, 'wrong', wrong,
+    'delta', d, 'scores', sc, 'stats', st, 'cur', null, 'timer_end', null, 'timer_left', null,
     'history', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb) from jsonb_array_elements(
-        jsonb_build_array(jsonb_build_object('round', b->'round', 'smart', b->'smart', 'honest', honest, 'pick', p_pick, 'correct', ok,
-                                             'void', p_void, 'q', b->'q'->'text', 'delta', delta))
-        || coalesce(b->'history', '[]'::jsonb)) with ordinality z(x, i) where i <= 10));
+        jsonb_build_array(jsonb_build_object('round', b->'round', 'smart', sm, 'honest', honest, 'pick', p_pick, 'correct', ok,
+                                             'void', p_void, 'q', b->'q'->'text', 'delta', d))
+        || coalesce(b->'history', '[]'::jsonb)) with ordinality z(x, i) where i <= 20));
 end $$;
 
--- 自动推进：大家都选完（或 20 秒到）就定大聪明；大家都看过身份就给大聪明两道题选
+-- 自动推进：大家都选完（或 20 秒到）就定大聪明；大家都看过身份就给大聪明两道题选；
+-- 准备时间到（或都点了准备好）就开始发言；发言时间到就算说完
 create or replace function public._ldc_bluff_settle(st jsonb, online jsonb) returns jsonb
 language plpgsql volatile as $$
 declare b jsonb := st->'bluff'; pon jsonb; vol jsonb; q jsonb; everyone boolean; now_ms bigint := public._ldc_now_ms();
 begin
   if b is null then return st; end if;
+  -- 旧版本的房间：换成新规则（保留总分）
+  if not (b ? 'bank') then
+    b := public._ldc_bluff_init() || jsonb_build_object('scores', coalesce(b->'scores', '{}'::jsonb));
+  end if;
   pon := (select coalesce(jsonb_agg(e), '[]'::jsonb) from jsonb_array_elements_text(coalesce(b->'players', '[]'::jsonb)) e where online ? e);
   if b->>'phase' = 'recruit' then
     select not exists (select 1 from jsonb_array_elements_text(pon) e where not (b->'want' ? e)) into everyone;
@@ -344,18 +387,15 @@ begin
     end if;
   elsif b->>'phase' = 'roles' then
     if jsonb_array_length(pon) > 0 and public._ldc_subset(pon, b->'seen') then
-      q := public._ldc_bluff_two(st, '[]'::jsonb);
-      b := b || jsonb_build_object('phase', 'choose', 'choices', q);   -- 空数组 = 这个房间的题玩完了
+      b := b || jsonb_build_object('phase', 'choose', 'choices', public._ldc_bluff_two(st, '[]'::jsonb));   -- 空数组 = 这个房间的题玩完了
     end if;
-  -- 思考：大家都点了「想好了」或时间到，就开始发言
   elsif b->>'phase' = 'think' then
     if (jsonb_array_length(pon) > 0 and public._ldc_subset(pon, b->'ready'))
        or (jsonb_typeof(b->'timer_end') = 'number' and now_ms >= (b->>'timer_end')::bigint) then
-      b := b || jsonb_build_object('phase', 'speak', 'cur', 0, 'timer_left', null, 'timer_end', now_ms + public._ldc_bluff_secs(b) * 1000);
+      b := b || jsonb_build_object('phase', 'speak', 'cur', null, 'timer_left', null, 'timer_end', null);
     end if;
-  -- 发言：时间到自动换下一位
   elsif b->>'phase' = 'speak' then
-    if jsonb_typeof(b->'timer_end') = 'number' and now_ms >= (b->>'timer_end')::bigint then
+    if b->>'cur' is not null and jsonb_typeof(b->'timer_end') = 'number' and now_ms >= (b->>'timer_end')::bigint then
       b := public._ldc_bluff_step(b, now_ms);
     end if;
   end if;
@@ -478,7 +518,7 @@ begin
     if p->'payload'->>'game' = 'bluff' then
       -- 换回瞎掰王时保留分数和设置
       st := jsonb_set(st, '{bluff}', public._ldc_bluff_init() || coalesce((select jsonb_object_agg(key, value) from jsonb_each(coalesce(st->'bluff', '{}'::jsonb))
-              where key in ('mode', 'timer', 'scoring', 'scores', 'round', 'history')), '{}'::jsonb));
+              where key in ('bank', 'mode', 'think', 'timer', 'warn_on', 'guess_n', 'rounds', 'scores', 'stats', 'round', 'history')), '{}'::jsonb));
     end if;
   elsif k = 'resume' then
     st := (st || '{"paused":false}'::jsonb) - 'paused_by' - 'paused_game';
@@ -490,7 +530,7 @@ begin
       st := jsonb_set(st, '{bluff}', (st->'bluff') || jsonb_build_object('timer_end', now_ms + (st->'bluff'->>'timer_left')::bigint, 'timer_left', null));
     end if;
   elsif k = 'restart_round' and st->>'game' = 'bluff' then
-    st := jsonb_set(st, '{bluff}', (st->'bluff') || jsonb_build_object('phase', 'setup', 'roles', '{}'::jsonb, 'smart', null, 'q', null, 'choices', '[]'::jsonb, 'timer_end', null, 'timer_left', null));
+    st := jsonb_set(st, '{bluff}', (st->'bluff') || public._ldc_bluff_fresh() || jsonb_build_object('phase', 'setup', 'smart', null));
   elsif k = 'bluff_redraw' and st->'bluff' is not null then
     -- 换题：已经有人看过答案，所以身份也重新分（大聪明不变）
     st := jsonb_set(st, '{bluff}', public._ldc_bluff_assign(st->'bluff'));
@@ -569,7 +609,7 @@ begin
             || jsonb_build_object('has_answer', (st->'truth'->'q'->>'answer') is not null));
   end if;
   -- 瞎掰王：揭晓前每个人只看到自己的身份；知识题答案只给老实人
-  if st->'bluff' is not null and st->'bluff'->>'phase' <> 'reveal' then
+  if st->'bluff' is not null and st->'bluff'->>'phase' not in ('reveal', 'final') then
     mine := st->'bluff'->'roles'->(p_me::text);
     st := jsonb_set(st, '{bluff,roles}', case when mine is null then '{}'::jsonb else jsonb_build_object(p_me::text, mine) end);
     -- 老实人只在思考时间看得到答案（发言时不能看着手机念）
@@ -731,7 +771,7 @@ begin
     elsif k = 'restart_round' then
       if st->(st->>'game') is null then err := 'no_game'; end if;
     elsif k in ('bluff_redraw', 'bluff_void') then
-      if st->>'game' <> 'bluff' or st->'bluff'->>'phase' not in ('roles', 'choose', 'think', 'speak', 'ask', 'guess')
+      if st->>'game' <> 'bluff' or st->'bluff'->>'phase' not in ('roles', 'choose', 'think', 'speak', 'guess')
          or (k = 'bluff_redraw' and st->'bluff'->>'phase' = 'guess') then err := 'phase'; end if;
     else err := 'bad_kind';
     end if;
@@ -888,16 +928,25 @@ begin
     elsif p_action = 'b_setup' then
       if bl->>'phase' <> 'setup' then err := 'phase';
       else
-        if a ? 'mode' then
-          if a->>'mode' in ('knowledge', 'story') then bl := bl || jsonb_build_object('mode', a->>'mode'); else err := 'bad_action'; end if;
+        if a ? 'bank' then
+          if a->>'bank' in ('idiom', 'word', 'allusion', 'mix', 'story') then
+            bl := bl || jsonb_build_object('bank', a->>'bank', 'mode', case when a->>'bank' = 'story' then 'story' else 'knowledge' end);
+          else err := 'bad_action'; end if;
         end if;
-        if a ? 'scoring' then bl := bl || jsonb_build_object('scoring', coalesce((a->>'scoring')::boolean, true)); end if;
+        if a ? 'warn_on' then bl := bl || jsonb_build_object('warn_on', coalesce((a->>'warn_on')::boolean, true)); end if;
+        if a ? 'guess_n' then
+          if a->>'guess_n' in ('0', '1', '2') then bl := bl || jsonb_build_object('guess_n', (a->>'guess_n')::int); else err := 'bad_action'; end if;
+        end if;
+        if a ? 'rounds' then
+          if a->>'rounds' in ('0', '1', '3', '5', '8') then bl := bl || jsonb_build_object('rounds', (a->>'rounds')::int); else err := 'bad_action'; end if;
+        end if;
       end if;
 
     elsif p_action = 'b_timer' then
-      v := coalesce((a->>'secs')::int, 0);
-      if v not in (60, 120, 180) then err := 'bad_action';
-      elsif bl->>'phase' = 'speak' then bl := bl || jsonb_build_object('timer', v, 'timer_left', null, 'timer_end', now_ms + v * 1000);
+      v := coalesce((a->>'secs')::int, -1);
+      if v not in (0, 60, 120, 180) then err := 'bad_action';
+      elsif bl->>'phase' = 'speak' and bl->>'cur' is not null then
+        bl := bl || jsonb_build_object('timer', v, 'timer_left', null, 'timer_end', case when v > 0 then to_jsonb(now_ms + v * 1000) else 'null'::jsonb end);
       else bl := bl || jsonb_build_object('timer', v);
       end if;
 
@@ -915,10 +964,24 @@ begin
 
     elsif p_action in ('b_start', 'b_next_round') then
       if (p_action = 'b_start' and bl->>'phase' <> 'setup') or (p_action = 'b_next_round' and bl->>'phase' <> 'reveal') then err := 'phase';
+      elsif p_action = 'b_next_round' and coalesce((bl->>'rounds')::int, 0) > 0 and (bl->>'round')::int >= (bl->>'rounds')::int then err := 'finished';
       elsif jsonb_array_length(online) < 3 then err := 'need3';
+      elsif jsonb_array_length(online) > 12 then err := 'too_many';
       else
         bl := _ldc_bluff_recruit(bl, online);
         st := st || jsonb_build_object('invite', jsonb_build_object('game', 'bluff', 'by', me, 'what', 'start', 'at', now_ms));
+      end if;
+
+    elsif p_action = 'b_final' then
+      if bl->>'phase' <> 'reveal' then err := 'phase';
+      else bl := bl || '{"phase":"final"}'::jsonb;
+      end if;
+
+    -- 再来一局：总分和统计清零
+    elsif p_action = 'b_again' then
+      if bl->>'phase' <> 'final' then err := 'phase';
+      else bl := bl || _ldc_bluff_fresh() || jsonb_build_object('phase', 'setup', 'round', 0, 'scores', '{}'::jsonb, 'stats', '{}'::jsonb,
+                 'history', '[]'::jsonb, 'players', '[]'::jsonb, 'smart', null);
       end if;
 
     elsif p_action = 'b_want' then
@@ -933,15 +996,36 @@ begin
       else bl := jsonb_set(bl, '{seen}', _ldc_add(bl->'seen', me));
       end if;
 
+    -- 大聪明点下一位发言的人（大聪明不在线时谁都可以帮忙点）
+    elsif p_action = 'b_call' then
+      t := a->>'player';
+      if bl->>'phase' <> 'speak' or bl->>'cur' is not null then err := 'phase';
+      elsif bl->>'smart' <> me and online ? (bl->>'smart') then err := 'not_yours';
+      elsif t is null or not (bl->'order' ? t) or coalesce(bl->'spoken', '[]'::jsonb) ? t then err := 'bad_target';
+      else
+        v := _ldc_bluff_secs(bl);
+        bl := bl || jsonb_build_object('cur', t, 'timer_left', null, 'timer_end', case when v > 0 then to_jsonb(now_ms + v * 1000) else 'null'::jsonb end);
+      end if;
+
     elsif p_action in ('b_next', 'b_skip_speak') then
-      cur := bl->'order'->>((bl->>'cur')::int);
-      if bl->>'phase' <> 'speak' then err := 'phase';
+      cur := bl->>'cur';
+      if bl->>'phase' <> 'speak' or cur is null then err := 'phase';
       elsif p_action = 'b_skip_speak' and cur is distinct from me then err := 'not_yours';
-      -- 「说完了」：正在说的人或大聪明点；两个人都不在线时谁都可以帮忙
+      -- 「发言完成」：正在说的人或大聪明点；两个人都不在线时谁都可以帮忙
       elsif p_action = 'b_next' and not (cur = me or bl->>'smart' = me or (not (online ? cur) and not (online ? (bl->>'smart')))) then err := 'not_yours';
       else
         if p_action = 'b_skip_speak' then bl := jsonb_set(bl, '{skipped}', _ldc_add(bl->'skipped', me)); end if;
         bl := _ldc_bluff_step(bl, now_ms);
+      end if;
+
+    -- 警告牌：只有大聪明能发，必须在指认之前；每人每轮最多一张，不能撤回
+    elsif p_action = 'b_warn' then
+      t := a->>'player';
+      if not (bl->>'phase' = 'speak' or (bl->>'phase' = 'guess' and jsonb_array_length(coalesce(bl->'wrong', '[]'::jsonb)) = 0)) then err := 'phase';
+      elsif bl->>'smart' <> me then err := 'not_yours';
+      elsif coalesce((bl->>'warns_left')::int, 0) <= 0 then err := 'no_warns';
+      elsif t is null or not (bl->'order' ? t) or coalesce(bl->'warned', '[]'::jsonb) ? t then err := 'bad_target';
+      else bl := bl || jsonb_build_object('warned', _ldc_add(coalesce(bl->'warned', '[]'::jsonb), t), 'warns_left', (bl->>'warns_left')::int - 1);
       end if;
 
     -- 大聪明从两道题里选一道（大聪明不在线时谁都可以帮忙选）；「换两道」换一批
@@ -956,17 +1040,14 @@ begin
         bl := st->'bluff';
       end if;
 
-    elsif p_action = 'b_to_guess' then
-      if bl->>'phase' <> 'ask' then err := 'phase';
-      elsif bl->>'smart' <> me and online ? (bl->>'smart') then err := 'not_yours';
-      else bl := bl || '{"phase":"guess"}'::jsonb;
-      end if;
-
+    -- 指认：猜中或机会用完就结束；第一次猜错只公布「TA 不是老实人」
     elsif p_action = 'b_pick' then
       t := a->>'player';
       if bl->>'phase' <> 'guess' then err := 'phase';
       elsif bl->>'smart' <> me and online ? (bl->>'smart') then err := 'not_yours';
-      elsif t is null or not (bl->'order' ? t) then err := 'bad_target';
+      elsif t is null or not (bl->'order' ? t) or coalesce(bl->'wrong', '[]'::jsonb) ? t then err := 'bad_target';
+      elsif bl->'roles'->>t <> 'honest' and jsonb_array_length(coalesce(bl->'wrong', '[]'::jsonb)) + 1 < coalesce((bl->>'guesses')::int, 1) then
+        bl := jsonb_set(bl, '{wrong}', coalesce(bl->'wrong', '[]'::jsonb) || to_jsonb(t));
       else
         bl := _ldc_bluff_finish(bl, t, false);
         insert into ldc_events (room_id, player_id, kind, payload) values (r.id, v_pid, 'bluff_reveal',
@@ -1039,6 +1120,7 @@ revoke all on function public._ldc_hash(text), public._ldc_now_ms(), public._ldc
   public._ldc_bluff_init(), public._ldc_bluff_recruit(jsonb,jsonb), public._ldc_bluff_assign(jsonb), public._ldc_bluff_draw(jsonb),
   public._ldc_bluff_two(jsonb,jsonb), public._ldc_bluff_begin(jsonb,text),
   public._ldc_bluff_secs(jsonb), public._ldc_bluff_think(jsonb), public._ldc_bluff_step(jsonb,bigint),
+  public._ldc_bluff_fresh(), public._ldc_inc(jsonb,text,int), public._ldc_stat(jsonb,text,text,int),
   public._ldc_bluff_finish(jsonb,text,boolean), public._ldc_bluff_settle(jsonb,jsonb), public._ldc_here(jsonb,jsonb,text), public._ldc_move(jsonb,text,text)
   from public, anon, authenticated;
 revoke all on function public._ldc_king_setup(text,int), public._ldc_king_round(jsonb,text,jsonb,boolean),
