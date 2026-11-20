@@ -457,6 +457,24 @@ function bluffHTML() {
       <div class="push stack">${inRound && !seen ? '<button class="btn b1" data-act="b-seen">我知道了</button>' : '<p class="note">等其他人确认</p>'}</div>
       ${links(false)}`;
   }
+  if (b.phase === 'choose') {
+    const can = isSmart || !onlineIds().includes(b.smart), ch = b.choices || [];
+    if (S.bChoice && !ch.some(c => c.id === S.bChoice)) S.bChoice = null;
+    if (!can) return `
+      <div class="h-cap">第 ${b.round} 轮</div>
+      <h1 class="h-title disp">${esc(pname(b.smart))}在选题</h1>
+      ${bluffMine(b)}
+      ${links(false)}`;
+    return `
+      <div class="h-cap">第 ${b.round} 轮，${b.mode === 'knowledge' ? '知识瞎掰' : '故事瞎掰'}</div>
+      <h1 class="h-title disp">选一道</h1>
+      <div class="choices">${ch.map(c => `<button class="qcard choice ${S.bChoice === c.id ? 'on' : ''}" data-act="b-choice" data-id="${esc(c.id)}"><small>${esc(c.cat || '')}</small><p>${esc(c.text)}</p></button>`).join('')}</div>
+      <div class="push stack" style="margin-top:14px">
+        <button class="btn b1" data-act="b-choose" ${S.bChoice ? '' : 'disabled'}>${S.bChoice ? '就这道' : '先选一道'}</button>
+        <button class="link" data-act="b-more">换两道</button>
+      </div>
+      ${links(false)}`;
+  }
   const q = b.q || {};
   const qcard = `<div class="qcard"><p>${esc(q.text || '')}</p>${b.phase === 'speak' && timerText(b) ? `<div class="timer" data-btimer>${timerText(b)}</div>` : ''}</div>`;
   if (b.phase === 'speak') {
@@ -924,6 +942,9 @@ async function handle(a, ds = {}, el) {
       case 'b-start': await act('b_start'); break;
       case 'b-want': await act('b_want', { yes: ds.yes === '1' }); break;
       case 'b-seen': await act('b_seen'); break;
+      case 'b-choice': S.bChoice = ds.id; S.sig = ''; render(); break;
+      case 'b-choose': if (S.bChoice) { await act('b_choose', { id: S.bChoice }); S.bChoice = null; } break;
+      case 'b-more': S.bChoice = null; await act('b_more'); break;
       case 'b-next': await act('b_next'); break;
       case 'b-skip': await act('b_skip_speak'); break;
       case 'b-to-guess': S.bPick = null; await act('b_to_guess'); break;

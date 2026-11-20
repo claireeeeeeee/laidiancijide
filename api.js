@@ -148,20 +148,34 @@ function kingAction(db, st, online, me, action, a) {
 
 // ---------- 瞎掰王（对照 SQL 的 _ldc_bluff_*） ----------
 const bluffInit = () => ({ phase: 'setup', mode: 'knowledge', timer: 0, scoring: true, round: 0, players: [], want: {}, deadline: null,
-  smart: null, volunteered: false, roles: {}, seen: [], q: null, order: [], cur: 0, skipped: [], pick: null, correct: null, void: false,
+  smart: null, volunteered: false, roles: {}, seen: [], q: null, choices: [], order: [], cur: 0, skipped: [], pick: null, correct: null, void: false,
   honest: null, delta: {}, scores: {}, timer_end: null, timer_left: null, history: [] });
 const bluffRecruit = (b, online) => ({ ...b, phase: 'recruit', round: (b.round || 0) + 1, players: online.slice(), want: {}, deadline: Date.now() + VOTE_MS,
-  smart: null, volunteered: false, roles: {}, seen: [], q: null, order: [], cur: 0, skipped: [], pick: null, correct: null, void: false,
+  smart: null, volunteered: false, roles: {}, seen: [], q: null, choices: [], order: [], cur: 0, skipped: [], pick: null, correct: null, void: false,
   honest: null, delta: {}, timer_end: null, timer_left: null });
 function bluffAssign(b) {
   const others = b.players.filter(x => x !== b.smart), h = pick(others), roles = {};
   others.forEach(x => { roles[x] = x === h ? 'honest' : 'bluffer'; });
-  return { ...b, phase: 'roles', roles, seen: [], q: null, order: [], cur: 0, skipped: [], pick: null, timer_end: null, timer_left: null };
+  return { ...b, phase: 'roles', roles, seen: [], q: null, choices: [], order: [], cur: 0, skipped: [], pick: null, timer_end: null, timer_left: null };
 }
 function bluffDraw(st) {
   const Q = (window.LDC_QUESTIONS || []).filter(q => q.game === 'bluff' && q.type === st.bluff.mode), used = st.used_q || [];
   const q = pick(Q.filter(x => !used.includes(x.id))) || pick(Q);
   return q ? { id: q.id, cat: q.cat, text: q.text, answer: q.answer, explain: q.explain } : null;
+}
+// 给大聪明的两道候选题（只有题目）：优先没出过的，notIds（上一批）排最后
+function bluffTwo(st, notIds = []) {
+  const used = st.used_q || [], rank = q => (notIds.includes(q.id) ? 2 : 0) + (used.includes(q.id) ? 1 : 0);
+  const Q = shuffle((window.LDC_QUESTIONS || []).filter(q => q.game === 'bluff' && q.type === st.bluff.mode));
+  return Q.sort((x, y) => rank(x) - rank(y)).slice(0, 2).map(q => ({ id: q.id, cat: q.cat, text: q.text }));
+}
+function bluffBegin(st, id) {
+  const q = (window.LDC_QUESTIONS || []).find(x => x.id === id && x.game === 'bluff'), b = st.bluff;
+  if (!q) return st;
+  st.bluff = { ...b, q: { id: q.id, cat: q.cat, text: q.text, answer: q.answer, explain: q.explain }, choices: [], phase: 'speak', cur: 0, skipped: [],
+    timer_left: null, order: shuffle(b.players.filter(x => x !== b.smart)), timer_end: b.timer > 0 ? Date.now() + b.timer * 1000 : null };
+  st.used_q = [q.id, ...(st.used_q || [])].slice(0, 400);
+  return st;
 }
 function bluffFinish(b, pk, isVoid) {
   const honest = Object.keys(b.roles || {}).find(k => b.roles[k] === 'honest') || null;
@@ -187,12 +201,8 @@ function bluffSettle(st, online) {
     }
   } else if (b.phase === 'roles') {
     if (pon.length && subset(pon, b.seen)) {
-      st.bluff = b; const q = bluffDraw(st);
-      if (q) {
-        b = { ...b, q, phase: 'speak', cur: 0, skipped: [], timer_left: null, order: shuffle(b.players.filter(x => x !== b.smart)),
-              timer_end: b.timer > 0 ? Date.now() + b.timer * 1000 : null };
-        st.used_q = [q.id, ...(st.used_q || [])].slice(0, 400);
-      }
+      st.bluff = b; const two = bluffTwo(st);
+      if (two.length) b = { ...b, phase: 'choose', choices: two };
     }
   }
   st.bluff = b; return st;
@@ -216,7 +226,7 @@ function applyProposal(st, p, online) {
     if (tr && typeof tr.timer_left === 'number') st.truth = { ...tr, timer_end: Date.now() + tr.timer_left, timer_left: null };
     if (st.bluff && typeof st.bluff.timer_left === 'number') st.bluff = { ...st.bluff, timer_end: Date.now() + st.bluff.timer_left, timer_left: null };
   } else if (p.kind === 'restart_round' && st.game === 'bluff') {
-    st.bluff = { ...st.bluff, phase: 'setup', roles: {}, smart: null, q: null, timer_end: null, timer_left: null };
+    st.bluff = { ...st.bluff, phase: 'setup', roles: {}, smart: null, q: null, choices: [], timer_end: null, timer_left: null };
   } else if (p.kind === 'bluff_redraw' && st.bluff) {
     st.bluff = bluffAssign(st.bluff);
   } else if (p.kind === 'bluff_void' && st.bluff) {
@@ -391,7 +401,7 @@ const mock = {
       } else if (k === 'restart_round') { if (!st[st.game]) err = 'no_game'; }
       else if (k === 'bluff_redraw' || k === 'bluff_void') {
         const ph = st.bluff && st.bluff.phase;
-        if (st.game !== 'bluff' || !['roles', 'speak', 'ask', 'guess'].includes(ph) || (k === 'bluff_redraw' && ph === 'guess')) err = 'phase';
+        if (st.game !== 'bluff' || !['roles', 'choose', 'speak', 'ask', 'guess'].includes(ph) || (k === 'bluff_redraw' && ph === 'guess')) err = 'phase';
       }
       else err = 'bad_kind';
       if (!err) {
@@ -514,6 +524,12 @@ const mock = {
           if (b.cur + 1 >= b.order.length) Object.assign(b, { phase: 'ask', cur: b.order.length, timer_end: null, timer_left: null });
           else Object.assign(b, { cur: b.cur + 1, timer_left: null, timer_end: b.timer > 0 ? now + b.timer * 1000 : null });
         }
+      } else if (action === 'b_choose' || action === 'b_more') {
+        if (b.phase !== 'choose') err = 'phase';
+        else if (b.smart !== me && online.includes(b.smart)) err = 'not_yours';
+        else if (action === 'b_more') b.choices = bluffTwo(st, b.choices.map(c => c.id));
+        else if (!b.choices.some(c => c.id === a.id)) err = 'bad_target';
+        else { st = bluffBegin(st, a.id); b = st.bluff; }
       } else if (action === 'b_to_guess') {
         if (b.phase !== 'ask') err = 'phase';
         else if (b.smart !== me && online.includes(b.smart)) err = 'not_yours';

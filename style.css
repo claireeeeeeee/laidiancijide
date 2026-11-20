@@ -275,6 +275,12 @@ textarea.king-field{resize:vertical}
 .mine-role{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;font-size:14px;color:var(--muted)}
 .mine-role + .answer{margin-top:10px}
 .row.cur{background:linear-gradient(90deg,transparent,var(--line),transparent)}
+.choices{display:grid;gap:12px}
+.qcard.choice{text-align:left;width:100%;color:inherit;font:inherit;padding:18px 18px 20px}
+.qcard.choice small{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+.qcard.choice p{font-size:20px}
+.qcard.choice.on{border-color:var(--a2);border-width:2.5px}
+[data-skin="night"] .qcard.choice.on{border-color:var(--a2);box-shadow:0 0 22px #3ee6e055}
 .cands{display:grid;gap:10px}
 .cand{padding:18px;border-radius:16px;border:1.5px solid var(--line);background:var(--surface);font-size:18px;font-weight:700;text-align:left}
 .cand.on{border-color:var(--a1);border-width:2.5px;background:var(--well)}
