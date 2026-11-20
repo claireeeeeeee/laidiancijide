@@ -258,8 +258,8 @@ const typeName = id => (TTYPES.find(x => x.id === id) || {}).name || '';
 function timerText(t) {
   if (typeof t.timer_left === 'number') return `${Math.ceil(t.timer_left / 1000)} 秒（暂停中）`;
   if (typeof t.timer_end !== 'number') return '';
-  const left = t.timer_end - serverNow();
-  return left > 0 ? `${Math.ceil(left / 1000)} 秒` : '时间到';
+  const left = t.timer_end - serverNow(), sec = Math.ceil(left / 1000);
+  return left <= 0 ? '时间到' : sec >= 60 ? `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}` : `${sec} 秒`;
 }
 function truthHTML() {
   const t = st().truth || {}, my = me();
@@ -392,11 +392,18 @@ function kingHTML() {
 
 // ---------- 瞎掰王 ----------
 const BMODES = [{ id: 'knowledge', name: '知识瞎掰', sub: '只有老实人知道答案', hl: 'hl1' }, { id: 'story', name: '故事瞎掰', sub: '老实人讲真事', hl: 'hl2' }];
-const BTIMERS = [[0, '不限'], [30, '30 秒'], [60, '60 秒'], [90, '90 秒']];
+const BTIMERS = [[60, '1 分钟'], [120, '2 分钟'], [180, '3 分钟']];
+// 瞎掰王题目可以带领域提示：「题目｜领域」，领域写在卡片上给大家看（有的是故意写错的）
+const qMain = t => String(t || '').split('｜')[0];
+const qHint = t => { const h = String(t || '').split('｜')[1]; return h ? `<span class="qhint">领域：${esc(h)}</span>` : ''; };
+const qBody = t => `${qHint(t)}<p>${esc(qMain(t))}</p>`;
+const BTHINK = [[30, '30 秒'], [60, '1 分钟'], [120, '2 分钟']];
+const bSecs = b => ([60, 120, 180].includes(b.timer) ? b.timer : 180);
+const bThink = b => ([30, 60, 120].includes(b.think) ? b.think : 60);
 const ROLE_NAME = { smart: '大聪明', honest: '老实人', bluffer: '瞎掰人' };
 function roleTip(role, mode) {
   if (role === 'smart') return '听大家讲，找出唯一的老实人';
-  if (role === 'honest') return mode === 'knowledge' ? '你能看到答案，照实说' : '讲一件真实发生过的事';
+  if (role === 'honest') return mode === 'knowledge' ? '思考时记住答案，发言时手机上看不到' : '讲一件真实发生过的事';
   if (role === 'bluffer') return mode === 'knowledge' ? '你看不到答案，编一个像真的' : '编一个没发生过的事';
   return '这一轮你在旁边看';
 }
@@ -424,7 +431,8 @@ function bluffHTML() {
       <div class="h-cap">瞎掰王</div>
       <h1 class="h-title disp">设置</h1>
       <div class="bmodes">${BMODES.map(m => `<button class="type ${b.mode === m.id ? 'on' : ''}" data-act="b-mode" data-mode="${m.id}"><span class="disp ${m.hl}">${m.name}</span><small>${m.sub}</small></button>`).join('')}</div>
-      <div class="timer-row"><span>每人发言</span>${BTIMERS.map(([v, n]) => `<button class="chip ${(b.timer || 0) === v ? 'on' : ''}" data-act="b-timer" data-secs="${v}">${n}</button>`).join('')}</div>
+      <div class="timer-row"><span>思考</span>${BTHINK.map(([v, n]) => `<button class="chip ${bThink(b) === v ? 'on' : ''}" data-act="b-think" data-secs="${v}">${n}</button>`).join('')}</div>
+      <div class="timer-row"><span>每人发言</span>${BTIMERS.map(([v, n]) => `<button class="chip ${bSecs(b) === v ? 'on' : ''}" data-act="b-timer" data-secs="${v}">${n}</button>`).join('')}</div>
       <div class="timer-row"><span>计分</span><button class="chip ${b.scoring !== false ? 'on' : ''}" data-act="b-score" data-on="1">开</button><button class="chip ${b.scoring === false ? 'on' : ''}" data-act="b-score" data-on="0">关</button></div>
       ${bluffScores(b)}
       <div class="push stack">
@@ -460,6 +468,11 @@ function bluffHTML() {
   if (b.phase === 'choose') {
     const can = isSmart || !onlineIds().includes(b.smart), ch = b.choices || [];
     if (S.bChoice && !ch.some(c => c.id === S.bChoice)) S.bChoice = null;
+    if (!ch.length) return `
+      <div class="h-cap">第 ${b.round} 轮</div>
+      <h1 class="h-title disp">题玩完了</h1>
+      <p class="note" style="text-align:left">这个房间已经玩过所有${b.mode === 'knowledge' ? '知识' : '故事'}题</p>
+      <div class="push stack"><button class="btn b1" data-act="b-void">这轮作废</button></div>`;
     if (!can) return `
       <div class="h-cap">第 ${b.round} 轮</div>
       <h1 class="h-title disp">${esc(pname(b.smart))}在选题</h1>
@@ -468,15 +481,31 @@ function bluffHTML() {
     return `
       <div class="h-cap">第 ${b.round} 轮，${b.mode === 'knowledge' ? '知识瞎掰' : '故事瞎掰'}</div>
       <h1 class="h-title disp">选一道</h1>
-      <div class="choices">${ch.map(c => `<button class="qcard choice ${S.bChoice === c.id ? 'on' : ''}" data-act="b-choice" data-id="${esc(c.id)}"><small>${esc(c.cat || '')}</small><p>${esc(c.text)}</p></button>`).join('')}</div>
+      <div class="choices">${ch.map(c => `<button class="qcard choice ${S.bChoice === c.id ? 'on' : ''}" data-act="b-choice" data-id="${esc(c.id)}"><small>${esc(c.cat || '')}</small>${qBody(c.text)}</button>`).join('')}</div>
       <div class="push stack" style="margin-top:14px">
         <button class="btn b1" data-act="b-choose" ${S.bChoice ? '' : 'disabled'}>${S.bChoice ? '就这道' : '先选一道'}</button>
-        <button class="link" data-act="b-more">换两道</button>
+        ${ch.length > 1 ? '<button class="link" data-act="b-more">换两道</button>' : ''}
       </div>
       ${links(false)}`;
   }
   const q = b.q || {};
-  const qcard = `<div class="qcard"><p>${esc(q.text || '')}</p>${b.phase === 'speak' && timerText(b) ? `<div class="timer" data-btimer>${timerText(b)}</div>` : ''}</div>`;
+  const qcard = `<div class="qcard">${qBody(q.text)}${b.phase === 'speak' && timerText(b) ? `<div class="timer" data-btimer>${timerText(b)}</div>` : ''}</div>`;
+  if (b.phase === 'think') {
+    const ready = (b.ready || []).includes(my);
+    const on = (b.players || []).filter(id => onlineIds().includes(id));
+    const isHonest = (b.roles || {})[my] === 'honest';
+    return `
+      <div class="h-cap">${b.mode === 'knowledge' ? '知识瞎掰' : '故事瞎掰'}，${esc(q.cat || '')}</div>
+      <h1 class="h-title disp">想一想</h1>
+      <div class="qcard">${qBody(q.text)}<div class="timer" data-btimer>${timerText(b)}</div></div>
+      ${bluffMine(b)}
+      ${isHonest && b.mode === 'knowledge' ? '<p class="note" style="text-align:left">开始发言后答案会收起来</p>' : ''}
+      <p class="note">发言顺序：${b.order.map(id => youOr(id)).join('、')}</p>
+      <div class="push stack" style="margin-top:14px">
+        ${inRound && !ready ? '<button class="btn b1" data-act="b-ready">想好了</button>' : `<p class="note">${(b.ready || []).length}/${on.length} 想好了</p>`}
+      </div>
+      ${links(true)}`;
+  }
   if (b.phase === 'speak') {
     const cur = b.order[b.cur];
     const rows = b.order.map((id, i) => `<div class="row ${i === b.cur ? 'cur' : ''}"><span class="n" style="font-size:22px;width:28px">${i + 1}</span><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}</span>
@@ -510,7 +539,7 @@ function bluffHTML() {
     const can = isSmart || !onlineIds().includes(b.smart);
     if (S.bPick && !b.order.includes(S.bPick)) S.bPick = null;
     return `
-      <div class="h-cap">${esc(q.text || '')}</div>
+      <div class="h-cap">${esc(qMain(q.text))}</div>
       <h1 class="h-title disp">${can ? '谁是老实人' : `${esc(pname(b.smart))}在猜`}</h1>
       <div class="cands">${b.order.map(id => `<button class="cand ${S.bPick === id ? 'on' : ''}" data-act="b-cand" data-pid="${id}" ${can ? '' : 'disabled'}>${esc(pname(id))}${id === my ? '（我）' : ''}</button>`).join('')}</div>
       <div class="push stack">${can ? `<button class="btn b1" data-act="b-pick" ${S.bPick ? '' : 'disabled'}>${S.bPick ? `确定是${esc(pname(S.bPick))}` : '先选一个人'}</button><p class="note">确定后不能改</p>` : ''}</div>
@@ -532,7 +561,7 @@ function bluffHTML() {
       <h1 class="h-title disp ${b.void ? '' : b.correct ? 'hl1' : 'hl2'}">${title}</h1>
       <p class="note" style="text-align:left;margin:-8px 0 12px">${sub}</p>
       <div class="list reveal">${rows}</div>
-      ${q.text ? `<div class="answer" style="margin-top:12px"><b>${esc(q.text)}</b>${q.answer ? esc(q.answer) : '老实人讲的是真事'}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>` : ''}
+      ${q.text ? `<div class="answer" style="margin-top:12px"><b>${esc(qMain(q.text))}</b>${q.answer ? esc(q.answer) : '老实人讲的是真事'}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>` : ''}
       ${bluffScores(b)}
       <div class="push stack" style="margin-top:16px">
         <button class="btn b1" data-act="b-next-round">下一轮</button>
@@ -698,6 +727,8 @@ function tick() {
     const txt = timerText(t); el.textContent = txt; el.classList.toggle('up', txt === '时间到');
   });
   const bl = st().bluff;
+  // 思考 / 发言时间到：去服务器拿新状态（服务器会自动进入发言或换下一位）
+  if (bl && ['think', 'speak'].includes(bl.phase) && typeof bl.timer_end === 'number' && serverNow() - bl.timer_end > 300 && Date.now() - (S.bTimeup || 0) > 2500) { S.bTimeup = Date.now(); refresh(); }
   if (bl) document.querySelectorAll('[data-btimer]').forEach(el => {
     const txt = timerText(bl); el.textContent = txt; el.classList.toggle('up', txt === '时间到');
   });
@@ -939,6 +970,8 @@ async function handle(a, ds = {}, el) {
       case 'b-mode': await act('b_setup', { mode: ds.mode }); break;
       case 'b-score': await act('b_setup', { scoring: ds.on === '1' }); break;
       case 'b-timer': await act('b_timer', { secs: +ds.secs }); break;
+      case 'b-think': await act('b_think', { secs: +ds.secs }); break;
+      case 'b-ready': await act('b_ready'); break;
       case 'b-start': await act('b_start'); break;
       case 'b-want': await act('b_want', { yes: ds.yes === '1' }); break;
       case 'b-seen': await act('b_seen'); break;

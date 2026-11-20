@@ -147,33 +147,40 @@ function kingAction(db, st, online, me, action, a) {
 }
 
 // ---------- 瞎掰王（对照 SQL 的 _ldc_bluff_*） ----------
-const bluffInit = () => ({ phase: 'setup', mode: 'knowledge', timer: 0, scoring: true, round: 0, players: [], want: {}, deadline: null,
-  smart: null, volunteered: false, roles: {}, seen: [], q: null, choices: [], order: [], cur: 0, skipped: [], pick: null, correct: null, void: false,
+const bluffInit = () => ({ phase: 'setup', mode: 'knowledge', timer: 180, think: 60, ready: [], scoring: true, round: 0, players: [], want: {}, deadline: null,
+  smart: null, volunteered: false, roles: {}, seen: [], q: null, choices: [], ready: [], order: [], cur: 0, skipped: [], pick: null, correct: null, void: false,
   honest: null, delta: {}, scores: {}, timer_end: null, timer_left: null, history: [] });
 const bluffRecruit = (b, online) => ({ ...b, phase: 'recruit', round: (b.round || 0) + 1, players: online.slice(), want: {}, deadline: Date.now() + VOTE_MS,
-  smart: null, volunteered: false, roles: {}, seen: [], q: null, choices: [], order: [], cur: 0, skipped: [], pick: null, correct: null, void: false,
+  smart: null, volunteered: false, roles: {}, seen: [], q: null, choices: [], ready: [], order: [], cur: 0, skipped: [], pick: null, correct: null, void: false,
   honest: null, delta: {}, timer_end: null, timer_left: null });
 function bluffAssign(b) {
   const others = b.players.filter(x => x !== b.smart), h = pick(others), roles = {};
   others.forEach(x => { roles[x] = x === h ? 'honest' : 'bluffer'; });
-  return { ...b, phase: 'roles', roles, seen: [], q: null, choices: [], order: [], cur: 0, skipped: [], pick: null, timer_end: null, timer_left: null };
+  return { ...b, phase: 'roles', roles, seen: [], q: null, choices: [], ready: [], order: [], cur: 0, skipped: [], pick: null, timer_end: null, timer_left: null };
 }
 function bluffDraw(st) {
   const Q = (window.LDC_QUESTIONS || []).filter(q => q.game === 'bluff' && q.type === st.bluff.mode), used = st.used_q || [];
   const q = pick(Q.filter(x => !used.includes(x.id))) || pick(Q);
   return q ? { id: q.id, cat: q.cat, text: q.text, answer: q.answer, explain: q.explain } : null;
 }
-// 给大聪明的两道候选题（只有题目）：优先没出过的，notIds（上一批）排最后
+// 给大聪明的两道候选题（只有题目）：这个房间玩过的题不再出，notIds（上一批）排最后
 function bluffTwo(st, notIds = []) {
-  const used = st.used_q || [], rank = q => (notIds.includes(q.id) ? 2 : 0) + (used.includes(q.id) ? 1 : 0);
-  const Q = shuffle((window.LDC_QUESTIONS || []).filter(q => q.game === 'bluff' && q.type === st.bluff.mode));
+  const used = st.used_q || [], rank = q => (notIds.includes(q.id) ? 1 : 0);
+  const Q = shuffle((window.LDC_QUESTIONS || []).filter(q => q.game === 'bluff' && q.type === st.bluff.mode && !used.includes(q.id)));
   return Q.sort((x, y) => rank(x) - rank(y)).slice(0, 2).map(q => ({ id: q.id, cat: q.cat, text: q.text }));
 }
+// 每人发言秒数（1/2/3 分钟，旧的「不限」按 3 分钟）、思考秒数（默认 1 分钟）
+const bluffSecs = b => ([60, 120, 180].includes(b.timer) ? b.timer : 180);
+const bluffThink = b => ([30, 60, 120].includes(b.think) ? b.think : 60);
+// 换下一位发言（最后一位说完进入追问）
+const bluffStep = (b, now) => (b.cur + 1 >= b.order.length
+  ? { ...b, phase: 'ask', cur: b.order.length, timer_end: null, timer_left: null }
+  : { ...b, cur: b.cur + 1, timer_left: null, timer_end: now + bluffSecs(b) * 1000 });
 function bluffBegin(st, id) {
   const q = (window.LDC_QUESTIONS || []).find(x => x.id === id && x.game === 'bluff'), b = st.bluff;
   if (!q) return st;
-  st.bluff = { ...b, q: { id: q.id, cat: q.cat, text: q.text, answer: q.answer, explain: q.explain }, choices: [], phase: 'speak', cur: 0, skipped: [],
-    timer_left: null, order: shuffle(b.players.filter(x => x !== b.smart)), timer_end: b.timer > 0 ? Date.now() + b.timer * 1000 : null };
+  st.bluff = { ...b, q: { id: q.id, cat: q.cat, text: q.text, answer: q.answer, explain: q.explain }, choices: [], phase: 'think', ready: [], cur: 0, skipped: [],
+    timer_left: null, order: shuffle(b.players.filter(x => x !== b.smart)), timer_end: Date.now() + bluffThink(b) * 1000 };
   st.used_q = [q.id, ...(st.used_q || [])].slice(0, 400);
   return st;
 }
@@ -202,8 +209,13 @@ function bluffSettle(st, online) {
   } else if (b.phase === 'roles') {
     if (pon.length && subset(pon, b.seen)) {
       st.bluff = b; const two = bluffTwo(st);
-      if (two.length) b = { ...b, phase: 'choose', choices: two };
+      b = { ...b, phase: 'choose', choices: two };   // 空数组 = 这个房间的题玩完了
     }
+  } else if (b.phase === 'think') {
+    if ((pon.length && subset(pon, b.ready || [])) || (typeof b.timer_end === 'number' && Date.now() >= b.timer_end))
+      b = { ...b, phase: 'speak', cur: 0, timer_left: null, timer_end: Date.now() + bluffSecs(b) * 1000 };
+  } else if (b.phase === 'speak') {
+    if (typeof b.timer_end === 'number' && Date.now() >= b.timer_end) b = bluffStep(b, Date.now());
   }
   st.bluff = b; return st;
 }
@@ -295,7 +307,8 @@ function view(db, room, me) {
   if (st.bluff && st.bluff.phase !== 'reveal') {
     const mine = st.bluff.roles[me];
     st.bluff.roles = mine == null ? {} : { [me]: mine };
-    if (st.bluff.q && mine !== 'honest') { const q = { ...st.bluff.q }; delete q.answer; delete q.explain; st.bluff.q = q; }
+    // 老实人只在思考时间看得到答案
+    if (st.bluff.q && (mine !== 'honest' || st.bluff.phase !== 'think')) { const q = { ...st.bluff.q }; delete q.answer; delete q.explain; st.bluff.q = q; }
   }
   delete st.used_q; delete st.game; delete st.proposal;
   return {
@@ -401,7 +414,7 @@ const mock = {
       } else if (k === 'restart_round') { if (!st[st.game]) err = 'no_game'; }
       else if (k === 'bluff_redraw' || k === 'bluff_void') {
         const ph = st.bluff && st.bluff.phase;
-        if (st.game !== 'bluff' || !['roles', 'choose', 'speak', 'ask', 'guess'].includes(ph) || (k === 'bluff_redraw' && ph === 'guess')) err = 'phase';
+        if (st.game !== 'bluff' || !['roles', 'choose', 'think', 'speak', 'ask', 'guess'].includes(ph) || (k === 'bluff_redraw' && ph === 'guess')) err = 'phase';
       }
       else err = 'bad_kind';
       if (!err) {
@@ -500,8 +513,16 @@ const mock = {
         }
       } else if (action === 'b_timer') {
         const v = +a.secs || 0;
-        if (![0, 30, 60, 90].includes(v)) err = 'bad_action';
-        else Object.assign(b, { timer: v, timer_left: null, timer_end: v > 0 && b.phase === 'speak' ? now + v * 1000 : null });
+        if (![60, 120, 180].includes(v)) err = 'bad_action';
+        else if (b.phase === 'speak') Object.assign(b, { timer: v, timer_left: null, timer_end: now + v * 1000 });
+        else b.timer = v;
+      } else if (action === 'b_think') {
+        const v = +a.secs || 0;
+        if (![30, 60, 120].includes(v)) err = 'bad_action'; else b.think = v;
+      } else if (action === 'b_ready') {
+        if (b.phase !== 'think') err = 'phase';
+        else if (!b.players.includes(me)) err = 'not_in_round';
+        else b.ready = add(b.ready || [], me);
       } else if (action === 'b_start' || action === 'b_next_round') {
         if ((action === 'b_start' && b.phase !== 'setup') || (action === 'b_next_round' && b.phase !== 'reveal')) err = 'phase';
         else if (online.length < 3) err = 'need3';
@@ -521,8 +542,7 @@ const mock = {
         else if (action === 'b_next' && !(cur === me || b.smart === me || (!online.includes(cur) && !online.includes(b.smart)))) err = 'not_yours';
         else {
           if (action === 'b_skip_speak') b.skipped = add(b.skipped, me);
-          if (b.cur + 1 >= b.order.length) Object.assign(b, { phase: 'ask', cur: b.order.length, timer_end: null, timer_left: null });
-          else Object.assign(b, { cur: b.cur + 1, timer_left: null, timer_end: b.timer > 0 ? now + b.timer * 1000 : null });
+          b = bluffStep(b, now);
         }
       } else if (action === 'b_choose' || action === 'b_more') {
         if (b.phase !== 'choose') err = 'phase';
@@ -603,5 +623,6 @@ function bump(code) { const ch = channels[code]; if (ch) try { ch.send(); } catc
 
 if (MOCK && !window.LDC_QUESTIONS) { const sc = document.createElement('script'); sc.src = 'questions.js'; document.head.appendChild(sc); }
 
+mock.__two = bluffTwo;   // 只给测试用
 window.LdcApi = { MOCK, GAMES_READY, ...(MOCK ? mock : real), subscribe, bump, _mock: mock };
 })();
