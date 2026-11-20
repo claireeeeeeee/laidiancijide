@@ -2,6 +2,7 @@
 (() => {
 'use strict';
 const A = window.LdcApi;
+const sound = window.LdcSound;
 const $ = s => document.querySelector(s);
 const app = $('#app'), overlay = $('#overlay'), toastEl = $('#toast');
 const Q = new URLSearchParams(location.search);
@@ -26,6 +27,7 @@ const gameName = id => (GAMES.find(g => g.id === id) || {}).plain || (GAMES.find
 const SKINS = [['night', '深夜'], ['oc', '蜜橙'], ['sakura', '樱粉']];
 const ERR = {
   bluff_waiting: '本轮暂停，等离开的玩家回来',
+  bluff_settings_owner: '由当前负责设置的玩家操作',
   busy: '已经有一个提议在等大家同意', not_ready: '这个游戏还在做，下一版上线', same: '已经在玩这个了', not_paused: '游戏没有暂停',
   bad_target: '现在不能跳过 TA', paused: '游戏暂停中', phase: '已经到下一步了', not_in_round: '这一轮你没参加，下一轮一起',
   already: '你已经摇过了', stale: '这个提议已经结束了', network: '网络不太好，再试一次', not_member: '你已经不在这个房间了',
@@ -93,7 +95,7 @@ function setSkin(k) {
   document.documentElement.dataset.skin = k; LS.set('ldc_skin', k);
   const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = k === 'night' ? '#1E1033' : k === 'oc' ? '#F3F7FC' : '#FFEAF3';
 }
-const skinBtn = () => `<button class="icon-btn round" data-act="skin" aria-label="换皮肤" aria-haspopup="true"><span class="skin-dot"></span></button>`;
+const skinBtn = () => `<button class="icon-btn round" data-act="skin" aria-label="皮肤和音效设置" aria-haspopup="true"><span class="skin-dot"></span></button>`;
 const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
 const dieHTML = (v, cls = '') => `<div class="die ${cls}" id="die" role="img" aria-label="${v ? v + ' 点' : '骰子'}">${
   Array.from({ length: 9 }, (_, i) => `<span class="${PIPS[v || 6].includes(i) ? 'on' : ''}"></span>`).join('')}</div>`;
@@ -475,22 +477,25 @@ function bluffHTML() {
   }
   if (b.phase === 'setup') {
     const on = inGameIds('bluff').length;
-    const chips = (list, cur, act) => list.map(([v, n]) => `<button class="chip ${cur === v ? 'on' : ''}" data-act="${act}" data-v="${v}">${n}</button>`).join('');
+    const editor = b.settings_order?.[0];
+    const canEdit = editor === my;
+    const chips = (list, cur, act) => list.map(([v, n]) => `<button class="chip ${cur === v ? 'on' : ''}" aria-pressed="${cur === v}" data-act="${act}" data-v="${v}" ${canEdit ? '' : 'disabled'}>${n}</button>`).join('');
     const wN = b.warn_on !== false ? autoWarns(on) : 0;
     return `
       <div class="h-cap">瞎掰王</div>
       <h1 class="h-title disp">设置</h1>
       ${bluffRules(S.bRules !== false, 'b-rules')}
+      ${canEdit ? '' : `<p class="note">${editor ? `${esc(pname(editor))}正在设置，等 TA 开始游戏。` : '正在确认负责设置的玩家。'}</p>`}
       <div class="timer-row wrap"><span>题库</span>${chips(BANKS, b.bank || 'mix', 'b-bank')}</div>
       <div class="timer-row"><span>准备</span>${chips(BTHINK, bThink(b), 'b-think')}</div>
       <div class="timer-row wrap"><span>每人发言</span>${chips(BTIMERS, bSecs(b), 'b-timer')}</div>
       <div class="timer-row"><span>警告牌</span>${chips([[1, '开'], [0, '关']], b.warn_on !== false ? 1 : 0, 'b-warnon')}</div>
       <div class="timer-row wrap"><span>轮数</span>${chips(BROUNDS, [0, 1, 3, 5, 8].includes(b.rounds) ? b.rounds : 5, 'b-rounds')}</div>
       <p class="note" style="text-align:left">现在 ${on} 人在线：警告牌 ${wN} 张，指认 1 次</p>
-      ${bluffScores(b)}
+      ${canEdit ? bluffScores(b) : ''}
       <div class="push stack">
         ${on < 3 ? '<p class="note">至少 3 个人在线才能开始</p>' : on > 12 ? '<p class="note">最多 12 个人</p>' : ''}
-        <button class="btn b1" data-act="b-start" ${on < 3 || on > 12 ? 'disabled' : ''}>开始</button>
+        <button class="btn b1" data-act="b-start" ${!canEdit || on < 3 || on > 12 ? 'disabled' : ''}>开始游戏</button>
       </div>`;
   }
   if (b.phase === 'recruit') {
@@ -670,12 +675,13 @@ function roomHTML() {
   const s = st();
   const g = myGame(), inGame = !!g;
   const pausedHere = !!s.paused && s.paused_game === g && inGame;
+  const canPause = inGame && !pausedHere && !(g === 'bluff' && s.bluff?.phase === 'setup');
   const body = !inGame ? lobbyHTML() : g === 'dice' ? diceHTML() : g === 'truth' ? truthHTML() : g === 'king' ? kingHTML() : g === 'bluff' ? bluffHTML() : '';
   return `
   <div class="topbar">
     ${inGame ? '<button class="icon-btn" data-act="back-lobby">‹ 大厅</button>' : `<span class="st" style="font-size:13px;color:var(--muted)">${players().filter(p => p.online).length} 人在线</span>`}
     <div class="grow"></div>
-    ${inGame && !pausedHere ? '<button class="icon-btn" data-act="pause">暂停</button>' : ''}
+    ${canPause ? '<button class="icon-btn" data-act="pause">暂停</button>' : ''}
     ${inGame ? '<button class="icon-btn" data-act="share">邀请</button>' : ''}
     ${skinBtn()}
   </div>
@@ -726,7 +732,8 @@ function menuHTML() {
   if (!S.menu) return '';
   const cur = document.documentElement.dataset.skin;
   return `<div class="menu" role="menu">${SKINS.map(([k, n]) => `<button role="menuitemradio" aria-checked="${k === cur}" data-act="set-skin" data-skin="${k}">
-    <i style="background:${k === 'night' ? 'linear-gradient(135deg,#FF4FA3 50%,#3EE6E0 50%)' : k === 'oc' ? 'linear-gradient(135deg,#FF9A3C 50%,#104E8B 50%)' : 'linear-gradient(135deg,#FFCEE3 0 33%,#678EC9 33% 66%,#262277 66%)'}"></i>${n}</button>`).join('')}</div>`;
+    <i style="background:${k === 'night' ? 'linear-gradient(135deg,#FF4FA3 50%,#3EE6E0 50%)' : k === 'oc' ? 'linear-gradient(135deg,#FF9A3C 50%,#104E8B 50%)' : 'linear-gradient(135deg,#FFCEE3 0 33%,#678EC9 33% 66%,#262277 66%)'}"></i>${n}</button>`).join('')}
+    <button class="sound-toggle" role="menuitemcheckbox" aria-checked="${sound.enabled}" data-act="sound-toggle">音效 <span>${sound.enabled ? '开' : '关'}</span></button></div>`;
 }
 function renderOverlay() { overlay.innerHTML = sheetHTML() + menuHTML(); }
 
@@ -743,6 +750,28 @@ function render() {
 }
 
 // ---------- 房间数据 ----------
+function roomSound(previous, next) {
+  if (!previous || previous.code !== next.code) return;
+  const game = next.state?.where?.[next.me];
+  if (!game || previous.state?.where?.[previous.me] !== game) return;
+  const old = previous.state[game], current = next.state[game];
+  if (!old || !current) return;
+
+  if (game === 'dice') {
+    if (current.phase === 'reveal' && old.phase !== 'reveal') return 'reveal';
+    if (current.phase === 'rolling' && current.round !== old.round) return 'turn';
+  } else if (game === 'truth') {
+    if (current.q?.id && current.q.id !== old.q?.id) return 'draw';
+  } else if (game === 'bluff') {
+    if (current.phase === 'reveal' && old.phase !== 'reveal') return 'reveal';
+    if (current.phase === 'think' && current.q?.id !== old.q?.id) return 'draw';
+    if (current.phase === 'speak' && current.cur && current.cur !== old.cur) return 'turn';
+    if (current.phase === 'guess' && old.phase !== 'guess') return 'turn';
+  } else if (game === 'king') {
+    if (current.phase === 'challenge' && old.phase !== 'challenge') return current.q?.id ? 'draw' : 'turn';
+    if (current.phase === 'command' && current.round !== old.round) return 'turn';
+  }
+}
 function setData(d) {
   if (!d || !d.players) return false;
   const tq = d.state && d.state.truth && d.state.truth.q;
@@ -751,7 +780,10 @@ function setData(d) {
   S.offset = (d.now || Date.now()) - Date.now();
   const sig = JSON.stringify([d.version, d.players, d.state]);
   const first = !S.data;
+  const cue = roomSound(S.data, d);
   S.data = d;
+  if (cue === 'reveal' && S.rolling && myGame() === 'dice') S.rollRevealCue = true;
+  else if (cue) sound.play(cue);
   const kingKey = d.state?.king?.key || null;
   if (S.kingDraft.key !== kingKey) S.kingDraft = { key: kingKey, text: '', numbers: [] };
   const n = d.state && d.state.notice;
@@ -869,6 +901,8 @@ let rollAnim = null;
 async function doRoll() {
   const d = st().dice || {};
   if (S.rolling || d.phase !== 'rolling' || !(d.participants || []).includes(me()) || (d.done || []).includes(me())) return;
+  sound.play('roll');
+  S.rollRevealCue = false;
   S.rolling = true; S.landed = false; S.rollFace = 1 + Math.floor(Math.random() * 6); render();
   if (navigator.vibrate) try { navigator.vibrate(30); } catch (e) {}
   rollAnim = setInterval(() => { S.rollFace = 1 + Math.floor(Math.random() * 6); setDieFace(S.rollFace); }, 90);
@@ -876,6 +910,8 @@ async function doRoll() {
   clearInterval(rollAnim); S.rolling = false; S.rollFace = null;
   if (r && r.value) { S.landed = true; setTimeout(() => { S.landed = false; }, 500); }
   if (r && r.players) { S.sig = ''; setData(r); } else render();
+  if (S.rollRevealCue && myGame() === 'dice') sound.play('reveal');
+  S.rollRevealCue = false;
   if (r && r.ok === false && r.error !== 'already') toast(ERR[r.error] || '出错了');
   if (r && r.ok !== false) A.bump(S.code);
   if (navigator.vibrate && r && r.value) try { navigator.vibrate([20, 40, 20]); } catch (e) {}
@@ -975,12 +1011,18 @@ document.addEventListener('click', e => {
 
 const busy = new Set();
 async function handle(a, ds = {}, el) {
-  if (a !== 'skin' && S.menu) { S.menu = false; renderOverlay(); }
+  if (a !== 'skin' && a !== 'sound-toggle' && S.menu) { S.menu = false; renderOverlay(); }
   if (busy.has(a)) return;
   busy.add(a); if (el && el.tagName === 'BUTTON' && !['skin', 'set-skin', 'close', 'close-bg'].includes(a)) el.disabled = true;
   try {
     switch (a) {
       case 'skin': S.menu = !S.menu; renderOverlay(); break;
+      case 'sound-toggle': {
+        sound.toggle();
+        renderOverlay();
+        overlay.querySelector('[data-act="sound-toggle"]')?.focus();
+        break;
+      }
       case 'set-skin': setSkin(ds.skin); S.menu = false; renderOverlay(); break;
       case 'home': goHome(); break;
       case 'join': {

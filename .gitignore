@@ -5,6 +5,7 @@
 !index.html
 !style.css
 !app.js
+!sounds.js
 !api.js
 !config.js
 !supabase_setup.sql

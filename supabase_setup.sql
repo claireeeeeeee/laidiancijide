@@ -228,7 +228,7 @@ end $$;
 create or replace function public._ldc_bluff_init() returns jsonb
 language sql immutable as $$
   select jsonb_build_object('phase', 'setup', 'bank', 'mix', 'mode', 'knowledge', 'think', 30, 'timer', 180,
-    'warn_on', true, 'rounds', 5, 'round', 0,
+    'warn_on', true, 'rounds', 5, 'round', 0, 'settings_order', '[]'::jsonb,
     'players', '[]'::jsonb, 'want', '{}'::jsonb, 'deadline', null, 'smart', null, 'volunteered', false,
     'roles', '{}'::jsonb, 'seen', '[]'::jsonb, 'choices', '[]'::jsonb, 'q', null, 'ready', '[]'::jsonb,
     'order', '[]'::jsonb, 'spoken', '[]'::jsonb, 'cur', null, 'skipped', '[]'::jsonb,
@@ -367,13 +367,18 @@ end $$;
 create or replace function public._ldc_bluff_settle(st jsonb, online jsonb) returns jsonb
 language plpgsql volatile as $$
 declare b jsonb := st->'bluff'; pon jsonb; vol jsonb; everyone boolean; now_ms bigint := public._ldc_now_ms();
-        away jsonb; clock_key text; clock jsonb;
+        away jsonb; clock_key text; clock jsonb; present jsonb;
 begin
   if b is null then return st; end if;
   -- 旧版本的房间：换成新规则（保留总分）
   if not (b ? 'bank') then
     b := public._ldc_bluff_init() || jsonb_build_object('scores', coalesce(b->'scores', '{}'::jsonb));
   end if;
+  -- 保留当前在场者的进入顺序，新进入者排在末尾。
+  select coalesce(jsonb_agg(id order by slot), '[]'::jsonb) into present
+    from jsonb_array_elements_text(coalesce(b->'settings_order', '[]'::jsonb)) with ordinality as p(id, slot)
+    where online ? id;
+  b := b || jsonb_build_object('settings_order', present || public._ldc_minus(online, present));
   -- 升级时已提交过一次指认的旧回合，直接按那次指认结算。
   if b->>'phase' = 'guess' and b->'wrong'->>0 is not null then
     return jsonb_set(st, '{bluff}', public._ldc_bluff_finish(b, b->'wrong'->>0, false));
@@ -545,7 +550,7 @@ begin
     if p->'payload'->>'game' = 'bluff' then
       -- 换回瞎掰王时保留分数和设置
       st := jsonb_set(st, '{bluff}', public._ldc_bluff_init() || coalesce((select jsonb_object_agg(key, value) from jsonb_each(coalesce(st->'bluff', '{}'::jsonb))
-              where key in ('bank', 'mode', 'think', 'timer', 'warn_on', 'rounds', 'scores', 'stats', 'round', 'history')), '{}'::jsonb));
+              where key in ('bank', 'mode', 'think', 'timer', 'warn_on', 'rounds', 'settings_order', 'scores', 'stats', 'round', 'history')), '{}'::jsonb));
     end if;
   elsif k = 'resume' then
     st := (st || '{"paused":false}'::jsonb) - 'paused_by' - 'paused_game';
@@ -833,6 +838,7 @@ begin
 
   elsif p_action = 'pause' then
     if ag is null then err := 'no_game';
+    elsif ag = 'bluff' and st->'bluff'->>'phase' = 'setup' then err := 'phase';
     elsif not coalesce((st->>'paused')::boolean, false) then
       st := st || jsonb_build_object('paused', true, 'paused_by', me, 'paused_game', ag, 'notice', jsonb_build_object('kind','pause','ok',true,'by',me,'at',now_ms,'payload',jsonb_build_object('game',ag)));
       tr := st->'truth';
@@ -971,26 +977,23 @@ begin
     if bl is null or not (online ? me) then err := 'no_game';
     elsif paused then err := 'paused';
     elsif jsonb_array_length(coalesce(bl->'away', '[]'::jsonb)) > 0 then err := 'bluff_waiting';
+    elsif p_action in ('b_setup', 'b_timer', 'b_think', 'b_start') and bl->>'phase' <> 'setup' then err := 'phase';
+    elsif p_action in ('b_setup', 'b_timer', 'b_think', 'b_start') and bl->'settings_order'->>0 is distinct from me then err := 'bluff_settings_owner';
 
     elsif p_action = 'b_setup' then
-      if bl->>'phase' <> 'setup' then err := 'phase';
-      else
-        if a ? 'bank' then
-          if a->>'bank' in ('idiom', 'word', 'allusion', 'mix', 'story') then
-            bl := bl || jsonb_build_object('bank', a->>'bank', 'mode', case when a->>'bank' = 'story' then 'story' else 'knowledge' end);
-          else err := 'bad_action'; end if;
-        end if;
-        if a ? 'warn_on' then bl := bl || jsonb_build_object('warn_on', coalesce((a->>'warn_on')::boolean, true)); end if;
-        if a ? 'rounds' then
-          if a->>'rounds' in ('0', '1', '3', '5', '8') then bl := bl || jsonb_build_object('rounds', (a->>'rounds')::int); else err := 'bad_action'; end if;
-        end if;
+      if a ? 'bank' then
+        if a->>'bank' in ('idiom', 'word', 'allusion', 'mix', 'story') then
+          bl := bl || jsonb_build_object('bank', a->>'bank', 'mode', case when a->>'bank' = 'story' then 'story' else 'knowledge' end);
+        else err := 'bad_action'; end if;
+      end if;
+      if a ? 'warn_on' then bl := bl || jsonb_build_object('warn_on', coalesce((a->>'warn_on')::boolean, true)); end if;
+      if a ? 'rounds' then
+        if a->>'rounds' in ('0', '1', '3', '5', '8') then bl := bl || jsonb_build_object('rounds', (a->>'rounds')::int); else err := 'bad_action'; end if;
       end if;
 
     elsif p_action = 'b_timer' then
       v := coalesce((a->>'secs')::int, -1);
       if v not in (0, 60, 120, 180) then err := 'bad_action';
-      elsif bl->>'phase' = 'speak' and bl->>'cur' is not null then
-        bl := bl || jsonb_build_object('timer', v, 'timer_left', null, 'timer_end', case when v > 0 then to_jsonb(now_ms + v * 1000) else 'null'::jsonb end);
       else bl := bl || jsonb_build_object('timer', v);
       end if;
 
@@ -1007,7 +1010,7 @@ begin
       end if;
 
     elsif p_action in ('b_start', 'b_next_round') then
-      if (p_action = 'b_start' and bl->>'phase' <> 'setup') or (p_action = 'b_next_round' and bl->>'phase' <> 'reveal') then err := 'phase';
+      if p_action = 'b_next_round' and bl->>'phase' <> 'reveal' then err := 'phase';
       elsif p_action = 'b_next_round' and coalesce((bl->>'rounds')::int, 0) > 0 and (bl->>'round')::int >= (bl->>'rounds')::int then err := 'finished';
       elsif jsonb_array_length(online) < 3 then err := 'need3';
       elsif jsonb_array_length(online) > 12 then err := 'too_many';

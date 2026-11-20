@@ -149,7 +149,7 @@ function kingAction(db, st, online, me, action, a) {
 // ---------- 瞎掰王（对照 SQL 的 _ldc_bluff_*） ----------
 const bluffFresh = () => ({ away: [], away_clock: null, roles: {}, seen: [], choices: [], q: null, ready: [], order: [], spoken: [], cur: null, skipped: [], warned: [], wrong: [],
   pick: null, correct: null, void: false, honest: null, delta: {}, timer_end: null, timer_left: null });
-const bluffInit = () => ({ phase: 'setup', bank: 'mix', mode: 'knowledge', think: 30, timer: 180, warn_on: true, rounds: 5, round: 0,
+const bluffInit = () => ({ phase: 'setup', bank: 'mix', mode: 'knowledge', think: 30, timer: 180, warn_on: true, rounds: 5, round: 0, settings_order: [],
   players: [], want: {}, deadline: null, smart: null, volunteered: false, ...bluffFresh(), warns_left: 0,
   scores: {}, stats: {}, history: [] });
 const bluffRecruit = (b, online) => ({ ...b, ...bluffFresh(), phase: 'recruit', round: (b.round || 0) + 1, players: online.slice(), want: {},
@@ -213,6 +213,8 @@ function bluffFinish(b, pk, isVoid) {
 function bluffSettle(st, online) {
   let b = st.bluff; if (!b) return st;
   if (!('bank' in b)) b = { ...bluffInit(), scores: b.scores || {} };   // 旧版本的房间
+  const present = (b.settings_order || []).filter(id => online.includes(id));
+  b.settings_order = [...present, ...online.filter(id => !present.includes(id))];
   if (b.phase === 'guess' && b.wrong?.length) {
     st.bluff = bluffFinish(b, b.wrong[0], false);
     return st;
@@ -269,7 +271,7 @@ function applyProposal(st, p, online) {
     if (st.game === 'dice') st.dice = diceInit();
     if (st.game === 'truth') st.truth = { ...truthInit('setup'), timer: (tr && tr.timer) || 0 };
     if (st.game === 'bluff') {
-      const keep = {}; ['bank', 'mode', 'think', 'timer', 'warn_on', 'rounds', 'scores', 'stats', 'round', 'history'].forEach(k => { if (st.bluff && k in st.bluff) keep[k] = st.bluff[k]; });
+      const keep = {}; ['bank', 'mode', 'think', 'timer', 'warn_on', 'rounds', 'settings_order', 'scores', 'stats', 'round', 'history'].forEach(k => { if (st.bluff && k in st.bluff) keep[k] = st.bluff[k]; });
       st.bluff = { ...bluffInit(), ...keep };
     }
   } else if (p.kind === 'resume') {
@@ -476,6 +478,7 @@ const mock = {
       }
     } else if (action === 'pause') {
       if (!ag) err = 'no_game';
+      else if (ag === 'bluff' && st.bluff?.phase === 'setup') err = 'phase';
       else if (!st.paused) {
         st.paused = true; st.paused_by = me; st.paused_game = ag; st.notice = { kind: 'pause', ok: true, by: me, at: now, payload: { game: ag } };
         if (st.truth && typeof st.truth.timer_end === 'number') { st.truth.timer_left = Math.max(st.truth.timer_end - now, 0); st.truth.timer_end = null; }
@@ -558,17 +561,15 @@ const mock = {
       if (!b || !online.includes(me)) err = 'no_game';
       else if (paused) err = 'paused';
       else if (b.away?.length) err = 'bluff_waiting';
+      else if (['b_setup', 'b_timer', 'b_think', 'b_start'].includes(action) && b.phase !== 'setup') err = 'phase';
+      else if (['b_setup', 'b_timer', 'b_think', 'b_start'].includes(action) && b.settings_order?.[0] !== me) err = 'bluff_settings_owner';
       else if (action === 'b_setup') {
-        if (b.phase !== 'setup') err = 'phase';
-        else {
-          if ('bank' in a) { if (['idiom', 'word', 'allusion', 'mix', 'story'].includes(a.bank)) { b.bank = a.bank; b.mode = a.bank === 'story' ? 'story' : 'knowledge'; } else err = 'bad_action'; }
-          if ('warn_on' in a) b.warn_on = a.warn_on !== false;
-          if ('rounds' in a) { if ([0, 1, 3, 5, 8].includes(a.rounds)) b.rounds = a.rounds; else err = 'bad_action'; }
-        }
+        if ('bank' in a) { if (['idiom', 'word', 'allusion', 'mix', 'story'].includes(a.bank)) { b.bank = a.bank; b.mode = a.bank === 'story' ? 'story' : 'knowledge'; } else err = 'bad_action'; }
+        if ('warn_on' in a) b.warn_on = a.warn_on !== false;
+        if ('rounds' in a) { if ([0, 1, 3, 5, 8].includes(a.rounds)) b.rounds = a.rounds; else err = 'bad_action'; }
       } else if (action === 'b_timer') {
         const v = a.secs == null ? -1 : +a.secs;
         if (![0, 60, 120, 180].includes(v)) err = 'bad_action';
-        else if (b.phase === 'speak' && b.cur) Object.assign(b, { timer: v, timer_left: null, timer_end: v > 0 ? now + v * 1000 : null });
         else b.timer = v;
       } else if (action === 'b_think') {
         const v = +a.secs || 0;
@@ -578,7 +579,7 @@ const mock = {
         else if (!b.players.includes(me)) err = 'not_in_round';
         else b.ready = add(b.ready || [], me);
       } else if (action === 'b_start' || action === 'b_next_round') {
-        if ((action === 'b_start' && b.phase !== 'setup') || (action === 'b_next_round' && b.phase !== 'reveal')) err = 'phase';
+        if (action === 'b_next_round' && b.phase !== 'reveal') err = 'phase';
         else if (action === 'b_next_round' && b.rounds > 0 && b.round >= b.rounds) err = 'finished';
         else if (online.length < 3) err = 'need3';
         else if (online.length > 12) err = 'too_many';
