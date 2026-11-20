@@ -11,3 +11,5 @@
 .DS_Store
 !questions.js
 !题库.sql
+!icons/
+!icons/*
