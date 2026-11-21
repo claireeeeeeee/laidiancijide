@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN" data-skin="night">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="referrer" content="no-referrer">
+<title>瞎掰王 · 主持面板</title>
+<link rel="stylesheet" href="style.css?v=13">
+<style>
+.control{width:min(100% - 32px,530px);margin:auto;padding:30px 0 48px}
+.control h1{font-size:28px}
+.control h2{font-size:18px}
+.control-section{margin-top:20px;padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}
+.control label{display:grid;gap:4px;font-size:14px}
+.control .btn{padding:10px 12px}
+.control .note{text-align:left}
+.control-top{display:flex;gap:12px;align-items:center;justify-content:space-between}
+.control-player{display:flex;gap:8px;justify-content:space-between;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.control-player:last-child{border-bottom:0}
+.control-player span:last-child{white-space:nowrap;color:var(--muted)}
+</style>
+</head>
+<body>
+<main class="control">
+  <h1>瞎掰王主持面板</h1>
+  <form id="control-login" class="control-section stack">
+    <label>房间号<input class="king-field" id="control-room" name="room" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="可留空"></label>
+    <label>主持密钥<input class="king-field" id="control-key" name="key" type="password" autocomplete="current-password" required></label>
+    <button class="btn b1" type="submit">打开面板</button>
+  </form>
+  <p class="note" id="control-status" role="status"></p>
+  <div id="control-dashboard" hidden>
+    <div class="control-top"><h2>房间管理</h2><button class="link" id="control-exit" type="button">退出面板</button></div>
+    <section class="control-section stack">
+      <label>切换房间<select class="king-field" id="control-rooms"></select></label>
+      <form class="stack" id="control-create-room">
+        <label>新房间号<input class="king-field" id="control-new-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="留空则随机生成"></label>
+        <button class="btn b3" type="submit">创建房间</button>
+      </form>
+      <div class="row2" id="control-invite" hidden>
+        <a class="btn b3" id="control-join-link" target="_blank" rel="noopener noreferrer">打开玩家页</a>
+        <button class="btn b3" type="button" id="control-copy">复制玩家链接</button>
+      </div>
+    </section>
+    <div id="control-game" hidden>
+    <p class="note" id="control-round"></p>
+    <section class="control-section">
+      <h2>本轮身份</h2>
+      <div id="control-players"></div>
+    </section>
+    <section class="control-section" id="control-current" hidden>
+      <h2>当前题目</h2>
+      <p class="note" id="control-current-question"></p>
+      <p class="note" id="control-current-answer"></p>
+    </section>
+    <section class="control-section stack">
+      <h2>指定下一道题</h2>
+      <p class="note" id="control-queued"></p>
+      <label>搜索题目<input class="king-field" id="control-search" type="search"></label>
+      <label>选题<select class="king-field" id="control-questions"></select></label>
+      <button class="btn b1" type="button" id="control-select" disabled>指定这道题</button>
+      <button class="link" type="button" id="control-clear" disabled>取消指定</button>
+    </section>
+    </div>
+  </div>
+</main>
+<script src="config.js?v=7"></script>
+<script src="api.js?v=16"></script>
+<script src="control.js?v=1"></script>
+</body>
+</html>

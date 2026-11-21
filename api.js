@@ -30,6 +30,9 @@ async function rpc(fn, args) {
 const real = {
   createRoom: (adminKey, code) => rpc('ldc_create_room', { p_admin_key: adminKey, p_code: code || null }),
   adminRooms: adminKey => rpc('ldc_admin_rooms', { p_admin_key: adminKey }),
+  bluffControl: (code, accessKey, action, id) => rpc('ldc_bluff_control', {
+    p_code: code, p_access_key: accessKey, p_action: action, p_question_id: id || null
+  }),
   join: (code, name, token) => rpc('ldc_join', { p_code: code, p_name: name || '', p_token: token || '' }),
   act: (code, token, action, args) => rpc('ldc_act', { p_code: code, p_token: token, p_action: action, p_args: args || {} }),
   rename: (code, token, name) => rpc('ldc_rename', { p_code: code, p_token: token, p_name: name }),
@@ -119,6 +122,7 @@ function kingAction(db, st, online, me, action, a) {
       q = draw(db, { ...st, truth: { ...truthInit('dice'), takers: targets } }, a.type, '', online);
       if (!q) return 'empty';
       st.used_q = [q.id, ...(st.used_q || [])].slice(0, 400);
+  if (st.bluff_next_q === q.id) delete st.bluff_next_q;
     }
     st.king = { ...k, phase: 'challenge', targets, q, results: {}, show_answer: false };
   } else if (action === 'k_answer') {
@@ -161,11 +165,17 @@ function bluffAssign(b) {
     warns_left: b.warn_on !== false ? (n <= 4 ? 0 : n <= 8 ? 1 : 2) : 0 };
 }
 const bankHas = (bk, q) => q.type === (bk === 'story' ? 'story' : 'knowledge');
-// 给大聪明的两道候选题（只有题目）：这个房间玩过的题不再出，notIds（上一批）排最后
+function bluffAvailable(st) {
+  return (window.LDC_QUESTIONS || []).filter(q =>
+    q.game === 'bluff' && bankHas(st.bluff?.bank, q) && !(st.used_q || []).includes(q.id));
+}
+// 已指定时只有这一道候选题；其他情况沿用随机二选一。
 function bluffTwo(st, notIds = []) {
-  const used = st.used_q || [], bk = st.bluff.bank || 'mix', rank = q => (notIds.includes(q.id) ? 1 : 0);
-  const Q = shuffle((window.LDC_QUESTIONS || []).filter(q => q.game === 'bluff' && bankHas(bk, q) && !used.includes(q.id)));
-  return Q.sort((x, y) => rank(x) - rank(y)).slice(0, 2).map(q => ({ id: q.id, text: q.text }));
+  const available = bluffAvailable(st);
+  const fixed = available.find(q => q.id === st.bluff_next_q);
+  const rank = q => (notIds.includes(q.id) ? 1 : 0);
+  const choices = fixed ? [fixed] : shuffle(available).sort((a, b) => rank(a) - rank(b)).slice(0, 2);
+  return choices.map(q => ({ id: q.id, text: q.text }));
 }
 // 每人发言秒数（1/2/3 分钟或 0 = 不限时，默认 3 分钟）、准备秒数（默认 30 秒）
 const bluffSecs = b => ([0, 60, 120, 180].includes(b.timer) ? b.timer : 180);
@@ -352,7 +362,7 @@ function view(db, room, me) {
     // 老实人只在思考时间看得到答案
     if (st.bluff.q && (mine !== 'honest' || st.bluff.phase !== 'think')) { const q = { ...st.bluff.q }; delete q.answer; delete q.explain; st.bluff.q = q; }
   }
-  delete st.used_q; delete st.game; delete st.proposal;
+  delete st.used_q; delete st.game; delete st.proposal; delete st.bluff_next_q;
   return {
     ok: true, code: room.code, me, version: room.version, now: Date.now(),
     players: roomPlayers(db, room).filter(p => !p.left_at).map(p => ({ id: p.id, name: p.nickname, seat: p.seat, online: Date.now() - p.last_seen < ONLINE_MS })),
@@ -387,6 +397,34 @@ const mock = {
       const ps = roomPlayers(db, r).filter(p => !p.left_at);
       return { code: r.code, created_at: r.created_at, game: r.state.game, players: ps.length, online: ps.filter(p => Date.now() - p.last_seen < ONLINE_MS).length };
     }) };
+  },
+  async bluffControl(code, accessKey, action, id) {
+    await sleep(60);
+    if (!accessKey) return { ok: false, error: 'forbidden' };
+    if (action === 'rooms') return mock.adminRooms(accessKey);
+    if (action === 'create') return mock.createRoom(accessKey, code);
+    if (!/^\d{6}$/.test(code)) return { ok: false, error: 'bad_code' };
+    if (!['view', 'select', 'clear'].includes(action)) return { ok: false, error: 'bad_action' };
+    const db = load(), room = db.rooms[code];
+    if (!room) return { ok: false, error: 'not_found' };
+    const st = clone(room.state), b = st.bluff || bluffInit();
+    const questions = bluffAvailable(st).map(q => ({ id: q.id, text: q.text.split('｜')[0] }))
+      .sort((a, b) => a.text.localeCompare(b.text, 'zh-CN'));
+    if (action === 'select') {
+      if (!questions.some(q => q.id === id)) return { ok: false, error: 'bad_question' };
+      st.bluff_next_q = id;
+    } else if (action === 'clear') delete st.bluff_next_q;
+    if (st.bluff_next_q !== room.state.bluff_next_q) {
+      if (b.phase === 'choose') b.choices = bluffTwo(st);
+      commit(db, room, st);
+    }
+    const online = onlineIds(db, room);
+    const players = roomPlayers(db, room).filter(p => !p.left_at || b.players.includes(p.id)).map(p => ({
+      id: p.id, name: p.nickname, online: online.includes(p.id),
+      role: p.id === b.smart ? 'smart' : b.roles[p.id] || null
+    }));
+    return { ok: true, code, phase: b.phase, round: b.round, bank: b.bank === 'story' ? 'story' : 'knowledge',
+      queued: st.bluff_next_q || null, current_question: b.q, players, questions };
   },
   async join(code, name, token) {
     await sleep(100);
@@ -563,7 +601,13 @@ const mock = {
       else if (['b_setup', 'b_timer', 'b_think', 'b_start'].includes(action) && b.phase !== 'setup') err = 'phase';
       else if (['b_setup', 'b_timer', 'b_think', 'b_start'].includes(action) && b.settings_order?.[0] !== me) err = 'bluff_settings_owner';
       else if (action === 'b_setup') {
-        if ('bank' in a) { if (['idiom', 'word', 'allusion', 'mix', 'story'].includes(a.bank)) { b.bank = a.bank; b.mode = a.bank === 'story' ? 'story' : 'knowledge'; } else err = 'bad_action'; }
+        if ('bank' in a) {
+          if (['idiom', 'word', 'allusion', 'mix', 'story'].includes(a.bank)) {
+            if ((b.bank === 'story') !== (a.bank === 'story')) delete st.bluff_next_q;
+            b.bank = a.bank;
+            b.mode = a.bank === 'story' ? 'story' : 'knowledge';
+          } else err = 'bad_action';
+        }
         if ('warn_on' in a) b.warn_on = a.warn_on !== false;
         if ('rounds' in a) { if ([0, 1, 3, 5, 8].includes(a.rounds)) b.rounds = a.rounds; else err = 'bad_action'; }
       } else if (action === 'b_timer') {

@@ -270,12 +270,19 @@ language sql volatile as $$ select null::jsonb $$;   -- 旧函数，已不用
 -- 给大聪明的两道候选题（只有题目，不带答案）。这个房间玩过的题（used_q）不再出；p_not 里的（上一批）排最后
 create or replace function public._ldc_bluff_two(st jsonb, p_not jsonb) returns jsonb
 language sql volatile as $$
-  select coalesce(jsonb_agg(jsonb_build_object('id', id, 'text', content)), '[]'::jsonb) from (
+  with available as (
     select id, content from public.ldc_questions
     where enabled and game_type = 'bluff'
       and qtype = case when st->'bluff'->>'bank' = 'story' then 'story' else 'knowledge' end
       and not (coalesce(st->'used_q', '[]'::jsonb) ? id)
-    order by coalesce(p_not, '[]'::jsonb) ? id, random() limit 2) z $$;
+  ), fixed as (
+    select id from available where id = st->>'bluff_next_q'
+  )
+  select coalesce(jsonb_agg(jsonb_build_object('id', id, 'text', content)), '[]'::jsonb) from (
+    select id, content from available
+    where not exists (select 1 from fixed) or id = (select id from fixed)
+    order by coalesce(p_not, '[]'::jsonb) ? id, random() limit 2
+  ) z $$;
 
 -- 每人发言秒数：1/2/3 分钟或 0 = 不限时（默认 3 分钟）
 create or replace function public._ldc_bluff_secs(b jsonb) returns int
@@ -310,6 +317,7 @@ begin
          'timer_left', null, 'timer_end', now_ms + public._ldc_bluff_think(b) * 1000);
   st := st || jsonb_build_object('used_q', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb) from
           jsonb_array_elements(jsonb_build_array(q.id) || coalesce(st->'used_q', '[]'::jsonb)) with ordinality z(x, i) where i <= 400));
+  if st->>'bluff_next_q' = q.id then st := st - 'bluff_next_q'; end if;
   return jsonb_set(st, '{bluff}', b);
 end $$;
 
@@ -658,7 +666,7 @@ begin
     st := jsonb_set(st, '{king,q}', ((st->'king'->'q') - 'answer' - 'explain')
       || jsonb_build_object('has_answer', coalesce(st->'king'->'q'->>'answer', '') <> ''));
   end if;
-  st := st - 'used_q' - 'game' - 'proposal';
+  st := st - 'used_q' - 'game' - 'proposal' - 'bluff_next_q';
   return jsonb_build_object(
     'ok', true, 'code', r.code, 'me', p_me::text, 'version', r.version, 'now', public._ldc_now_ms(),
     'players', (select coalesce(jsonb_agg(jsonb_build_object('id', id::text, 'name', nickname, 'seat', seat,
@@ -676,39 +684,38 @@ create or replace function public._ldc_is_admin(p_key text) returns boolean
 language sql stable as $$
   select coalesce(p_key,'') <> '' and exists (select 1 from public.ldc_settings where key = 'admin_hash' and value = public._ldc_hash(p_key)) $$;
 
-create or replace function public.ldc_create_room(p_admin_key text, p_code text default null) returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare v_code text := nullif(btrim(coalesce(p_code,'')), ''); tries int := 0;
+-- 站点管理员和独立主持面板共用房间创建、房间列表。
+create or replace function public._ldc_new_room(p_code text) returns jsonb
+language plpgsql set search_path = public as $$
+declare requested text := nullif(btrim(coalesce(p_code,'')), ''); v_code text;
 begin
-  if not _ldc_is_admin(p_admin_key) then return '{"ok":false,"error":"forbidden"}'; end if;
-  -- 指定房间号（6 位数字）；不指定就随机
-  if v_code is not null then
-    if v_code !~ '^[0-9]{6}$' then return '{"ok":false,"error":"bad_code"}'; end if;
-    if exists (select 1 from ldc_rooms where code = v_code) then return '{"ok":false,"error":"code_taken"}'; end if;
-  else
-    loop
-      v_code := lpad((floor(random() * 1000000))::int::text, 6, '0');
-      exit when not exists (select 1 from ldc_rooms where code = v_code);
-      tries := tries + 1;
-      if tries > 30 then return '{"ok":false,"error":"busy"}'; end if;
-    end loop;
-  end if;
-  insert into ldc_rooms (code, state) values (v_code, '{"game":null,"paused":false}');
-  return jsonb_build_object('ok', true, 'code', v_code);
+  if requested is not null and requested !~ '^[0-9]{6}$' then return '{"ok":false,"error":"bad_code"}'; end if;
+  for attempt in 1..30 loop
+    v_code := coalesce(requested, lpad(floor(random() * 1000000)::int::text, 6, '0'));
+    insert into ldc_rooms (code, state) values (v_code, '{"game":null,"paused":false}')
+      on conflict (code) do nothing;
+    if found then return jsonb_build_object('ok', true, 'code', v_code); end if;
+    if requested is not null then return '{"ok":false,"error":"code_taken"}'; end if;
+  end loop;
+  return '{"ok":false,"error":"busy"}';
 end $$;
 
--- 管理员查看自己建过的房间
-create or replace function public.ldc_admin_rooms(p_admin_key text) returns jsonb
-language plpgsql security definer set search_path = public as $$
-begin
-  if not _ldc_is_admin(p_admin_key) then return '{"ok":false,"error":"forbidden"}'; end if;
-  return jsonb_build_object('ok', true, 'rooms', coalesce((
+create or replace function public._ldc_room_list() returns jsonb
+language sql stable set search_path = public as $$
+  select jsonb_build_object('ok', true, 'rooms', coalesce((
     select jsonb_agg(jsonb_build_object('code', r.code, 'created_at', r.created_at, 'updated_at', r.updated_at, 'game', r.state->>'game',
              'players', (select count(*) from ldc_players p where p.room_id = r.id and p.left_at is null),
              'online',  (select count(*) from ldc_players p where p.room_id = r.id and p.left_at is null and p.last_seen > now() - interval '20 seconds'))
            order by r.created_at desc)
-    from (select * from ldc_rooms order by created_at desc limit 50) r), '[]'::jsonb));
-end $$;
+    from (select * from ldc_rooms order by created_at desc limit 50) r), '[]'::jsonb)) $$;
+
+create or replace function public.ldc_create_room(p_admin_key text, p_code text default null) returns jsonb
+language sql security definer set search_path = public as $$
+  select case when _ldc_is_admin(p_admin_key) then _ldc_new_room(p_code) else '{"ok":false,"error":"forbidden"}'::jsonb end $$;
+
+create or replace function public.ldc_admin_rooms(p_admin_key text) returns jsonb
+language sql security definer set search_path = public as $$
+  select case when _ldc_is_admin(p_admin_key) then _ldc_room_list() else '{"ok":false,"error":"forbidden"}'::jsonb end $$;
 
 -- 加入房间：带凭据 = 恢复原来的身份；不带 = 新玩家（昵称可以重复）
 create or replace function public.ldc_join(p_code text, p_name text, p_token text) returns jsonb
@@ -983,6 +990,9 @@ begin
     elsif p_action = 'b_setup' then
       if a ? 'bank' then
         if a->>'bank' in ('idiom', 'word', 'allusion', 'mix', 'story') then
+          if (coalesce(bl->>'bank', 'mix') = 'story') <> (a->>'bank' = 'story') then
+            st := st - 'bluff_next_q';
+          end if;
           bl := bl || jsonb_build_object('bank', a->>'bank', 'mode', case when a->>'bank' = 'story' then 'story' else 'knowledge' end);
         else err := 'bad_action'; end if;
       end if;
@@ -1159,7 +1169,61 @@ begin
   return '{"ok":true}';
 end $$;
 
--- ---------- 权限：网页只能调用 ldc_ 开头的 6 个函数 ----------
+-- 独立主持页：钥匙验证与进房凭据分开，不创建玩家，也不把身份写入公共响应。
+create or replace function public.ldc_bluff_control(p_code text, p_access_key text, p_action text, p_question_id text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare r ldc_rooms; s jsonb; b jsonb; bank_type text;
+begin
+  if coalesce(p_access_key, '') = '' or not exists (
+    select 1 from ldc_settings where key = 'bluff_control_hash' and value = _ldc_hash(p_access_key)
+  ) then return '{"ok":false,"error":"forbidden"}'; end if;
+  if p_action = 'rooms' then return _ldc_room_list(); end if;
+  if p_action = 'create' then return _ldc_new_room(p_code); end if;
+  if coalesce(p_code, '') !~ '^[0-9]{6}$' then return '{"ok":false,"error":"bad_code"}'; end if;
+  if p_action is null or p_action not in ('view', 'select', 'clear') then return '{"ok":false,"error":"bad_action"}'; end if;
+  if p_action = 'view' then
+    select * into r from ldc_rooms where code = p_code;
+  else
+    select * into r from ldc_rooms where code = p_code for update;
+  end if;
+  if not found then return '{"ok":false,"error":"not_found"}'; end if;
+  s := r.state;
+  b := coalesce(s->'bluff', _ldc_bluff_init());
+  bank_type := case when b->>'bank' = 'story' then 'story' else 'knowledge' end;
+
+  if p_action = 'select' then
+    if not exists (
+      select 1 from ldc_questions q where q.id = p_question_id and q.enabled and q.game_type = 'bluff'
+        and q.qtype = bank_type and not (coalesce(s->'used_q', '[]'::jsonb) ? q.id)
+    ) then return '{"ok":false,"error":"bad_question"}'; end if;
+    s := s || jsonb_build_object('bluff_next_q', p_question_id);
+  elsif p_action = 'clear' then
+    s := s - 'bluff_next_q';
+  end if;
+
+  if s is distinct from r.state then
+    if b->>'phase' = 'choose' then
+      b := b || jsonb_build_object('choices', _ldc_bluff_two(s, '[]'::jsonb));
+      s := jsonb_set(s, '{bluff}', b);
+    end if;
+    update ldc_rooms set state = s, version = version + 1, updated_at = now() where id = r.id;
+  end if;
+
+  return jsonb_build_object(
+    'ok', true, 'code', r.code, 'phase', b->>'phase', 'round', b->'round',
+    'bank', bank_type, 'queued', s->>'bluff_next_q',
+    'current_question', b->'q',
+    'players', (select coalesce(jsonb_agg(jsonb_build_object(
+                       'id', p.id, 'name', p.nickname, 'online', p.left_at is null and p.last_seen > now() - interval '20 seconds',
+                       'role', case when p.id::text = b->>'smart' then 'smart' else b->'roles'->>p.id::text end
+                     ) order by p.seat), '[]'::jsonb)
+                from ldc_players p where p.room_id = r.id and (p.left_at is null or b->'players' ? p.id::text)),
+    'questions', (select coalesce(jsonb_agg(jsonb_build_object('id', q.id, 'text', split_part(q.content, '｜', 1)) order by q.content, q.id), '[]'::jsonb)
+                  from ldc_questions q where q.enabled and q.game_type = 'bluff' and q.qtype = bank_type
+                    and not (coalesce(s->'used_q','[]'::jsonb) ? q.id)));
+end $$;
+
+-- ---------- 权限：网页只能调用 ldc_ 开头的函数 ----------
 revoke all on function public._ldc_hash(text), public._ldc_now_ms(), public._ldc_add(jsonb,text), public._ldc_del(jsonb,text),
   public._ldc_subset(jsonb,jsonb), public._ldc_online(uuid), public._ldc_dice_init(), public._ldc_dice_new_round(jsonb,jsonb),
   public._ldc_dice_reveal(jsonb), public._ldc_apply(jsonb,jsonb,jsonb), public._ldc_settle(jsonb,jsonb,uuid), public._ldc_view(uuid,uuid),
@@ -1178,6 +1242,10 @@ revoke all on function public.ldc_create_room(text,text), public.ldc_admin_rooms
 grant execute on function public.ldc_create_room(text,text), public.ldc_admin_rooms(text), public.ldc_join(text,text,text), public.ldc_act(text,text,text,jsonb),
   public.ldc_rename(text,text,text), public.ldc_leave(text,text) to anon, authenticated;
 
--- 运行成功的话，下面会列出 6 个 ldc_ 函数
+revoke all on function public._ldc_new_room(text), public._ldc_room_list() from public, anon, authenticated;
+revoke all on function public.ldc_bluff_control(text,text,text,text) from public;
+grant execute on function public.ldc_bluff_control(text,text,text,text) to anon, authenticated;
+
+-- 查看公开 RPC（主持接口会独立验证主持密钥）
 select routine_name from information_schema.routines
 where routine_schema = 'public' and routine_name like 'ldc\_%' order by 1;
