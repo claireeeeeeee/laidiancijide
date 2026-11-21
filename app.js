@@ -397,7 +397,7 @@ function kingHTML() {
 
 // ---------- 瞎掰王 ----------
 // ---------- 瞎掰王 ----------
-const BANKS = [['mix', '综合随机'], ['idiom', '冷门成语'], ['word', '生僻词汇'], ['allusion', '历史典故'], ['story', '故事']];
+const BANKS = [['mix', '知识题'], ['story', '故事']];
 const BTHINK = [[30, '30 秒'], [60, '1 分钟'], [120, '2 分钟']];
 const BTIMERS = [[60, '60 秒'], [120, '2 分钟'], [180, '3 分钟'], [0, '不限时']];
 const BROUNDS = [[1, '单轮'], [3, '3 轮'], [5, '5 轮'], [8, '8 轮'], [0, '不限']];
@@ -405,10 +405,11 @@ const bSecs = b => ([0, 60, 120, 180].includes(b.timer) ? b.timer : 180);
 const bThink = b => ([30, 60, 120].includes(b.think) ? b.think : 30);
 const autoWarns = n => (n <= 4 ? 0 : n <= 8 ? 1 : 2);
 const ROLE_NAME = { smart: '大聪明', honest: '老实人', bluffer: '捣蛋鬼' };
-// 瞎掰王题目可以带领域提示：「题目｜领域」，领域写在卡片上给大家看（有的是故意写错的）
+// 兼容正在玩的旧题，隐藏旧版写在题目末尾的领域标记。
 const qMain = t => String(t || '').split('｜')[0];
-const qHint = t => { const h = String(t || '').split('｜')[1]; return h ? `<span class="qhint">领域：${esc(h)}</span>` : ''; };
-const qBody = t => `${qHint(t)}<p>${esc(qMain(t))}</p>`;
+const qBody = q => `<p>${esc(qMain(q.text))}</p>${q.hints?.length
+  ? `<div class="q-hints" aria-label="三个提示">${q.hints.map(tag => `<span class="qhint">${esc(tag)}</span>`).join('')}</div>`
+  : ''}`;
 
 // 规则卡：设置页默认展开；游戏中点底部「规则」打开
 function bluffRules(open, act) {
@@ -418,6 +419,7 @@ function bluffRules(open, act) {
     <p><b class="t-honest">老实人</b>（1 人）唯一能看到正确解释的人。准备时间里记住，开始发言后手机上就看不到了。照真的说，可以用自己的话，但不能编。</p>
     <p><b class="t-bluffer">捣蛋鬼</b>（其余的人）看不到答案，现场编一个像真的解释：意思、来历、背后的故事都可以编。</p>
     <p><b>流程</b>报名当大聪明 → 看身份 → 大聪明二选一选题 → 准备 → 大聪明点人，每人解释一次，不能打断 → 指认 → 揭晓。</p>
+    <p><b>提示</b>知识题有三个公开提示，一真两假。故事题按题面讲真事或编故事。</p>
     <p><b>指认</b>每轮只猜一次，确认后立即揭晓。</p>
     <p><b>警告牌</b>3–4 人 0 张，5–8 人 1 张，9–12 人 2 张。指认前发，同一人每轮最多收一张。</p>
     <table class="bluff-points">
@@ -486,7 +488,7 @@ function bluffHTML() {
       <h1 class="h-title disp">设置</h1>
       ${bluffRules(S.bRules !== false, 'b-rules')}
       ${canEdit ? '' : `<p class="note">${editor ? `${esc(pname(editor))}正在设置，等 TA 开始游戏。` : '正在确认负责设置的玩家。'}</p>`}
-      <div class="timer-row wrap"><span>题库</span>${chips(BANKS, b.bank || 'mix', 'b-bank')}</div>
+      <div class="timer-row wrap"><span>题库</span>${chips(BANKS, b.bank === 'story' ? 'story' : 'mix', 'b-bank')}</div>
       <div class="timer-row"><span>准备</span>${chips(BTHINK, bThink(b), 'b-think')}</div>
       <div class="timer-row wrap"><span>每人发言</span>${chips(BTIMERS, bSecs(b), 'b-timer')}</div>
       <div class="timer-row"><span>警告牌</span>${chips([[1, '开'], [0, '关']], b.warn_on !== false ? 1 : 0, 'b-warnon')}</div>
@@ -544,8 +546,8 @@ function bluffHTML() {
       ${rulesTop}
       <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">选一道</h1>
-      <p class="tip">题目大家都能看到，只有老实人能看到解释。</p>
-      <div class="choices">${ch.map(c => `<button class="qcard choice ${S.bChoice === c.id ? 'on' : ''}" data-act="b-choice" data-id="${esc(c.id)}"><small>${esc(c.cat || '')}</small>${qBody(c.text)}</button>`).join('')}</div>
+      <p class="tip">${b.mode === 'story' ? '选一道大家都能讲的题目。' : '题目和三个提示大家都能看到，只有老实人能看到解释。'}</p>
+      <div class="choices">${ch.map(c => `<button class="qcard choice ${S.bChoice === c.id ? 'on' : ''}" data-act="b-choice" data-id="${esc(c.id)}">${qBody(c)}</button>`).join('')}</div>
       <div class="push stack" style="margin-top:14px">
         <button class="btn b1" data-act="b-choose" ${S.bChoice ? '' : 'disabled'}>${S.bChoice ? '就这道' : '先选一道'}</button>
         ${ch.length > 1 ? '<button class="link" data-act="b-more">换两道</button>' : ''}
@@ -561,9 +563,9 @@ function bluffHTML() {
       : role === 'smart' ? '<p class="tip">想想等下先点谁、怎么分辨谁在胡说。</p>' : '';
     return `
       ${rulesTop}
-      <div class="h-cap">${roundText(b)}，${esc(q.cat || '')}</div>
+      <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">准备</h1>
-      <div class="qcard">${qBody(q.text)}<div class="timer" data-btimer>${timerText(b)}</div></div>
+      <div class="qcard">${qBody(q)}<div class="timer" data-btimer>${timerText(b)}</div></div>
       ${bluffMine(b)}
       ${tip}
       <div class="push stack" style="margin-top:14px">
@@ -597,16 +599,18 @@ function bluffHTML() {
       head = canSmart ? '点下一位' : `${esc(pname(b.smart))}在点下一位`;
       act = canSmart ? `<p class="tip">每人解释一次，不能打断。点谁谁说。</p><div class="cands">${left.map(id => `<button class="cand" data-act="b-call" data-pid="${id}">${esc(pname(id))}${id === my ? '（我）' : ''}</button>`).join('')}</div>` : '';
     } else {
-      head = `${youOr(cur)}来解释`;
+      head = `${youOr(cur)}${b.mode === 'story' ? '来讲故事' : '来解释'}`;
+      const tip = b.mode === 'story' ? roleTip(myRole, 'story')
+        : myRole === 'honest' ? '照你记住的真解释说，可以用自己的话。' : '一本正经地编：意思、来历、背后的故事都可以。';
       act = cur === my
-        ? `<p class="tip">${myRole === 'honest' ? '照你记住的真解释说，可以用自己的话。' : '一本正经地编：意思、来历、背后的故事都可以。'}${bSecs(b) ? '时间到会自动结束。' : ''}</p><button class="btn b1" data-act="b-next">发言完成</button><button class="link" data-act="b-skip">不想说，跳过</button>`
+        ? `<p class="tip">${tip}${bSecs(b) ? '时间到会自动结束。' : ''}</p><button class="btn b1" data-act="b-next">发言完成</button><button class="link" data-act="b-skip">不想说，跳过</button>`
         : isSmart ? '<button class="btn b2" data-act="b-next">TA 说完了</button>' : `<p class="note">等${esc(pname(cur))}说完，不要打断</p>`;
     }
     return `
       ${rulesTop}
-      <div class="h-cap">${roundText(b)}，${esc(q.cat || '')}</div>
+      <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">${head}</h1>
-      <div class="qcard">${qBody(q.text)}${cur && timerText(b) ? `<div class="timer" data-btimer>${timerText(b)}</div>` : ''}</div>
+      <div class="qcard">${qBody(q)}${cur && timerText(b) ? `<div class="timer" data-btimer>${timerText(b)}</div>` : ''}</div>
       ${bluffMine(b)}
       <div class="push stack" style="margin-top:12px">${act}</div>
       <div class="list" style="margin-top:12px">${rows}</div>
@@ -618,8 +622,9 @@ function bluffHTML() {
     if (S.bPick && !cands.includes(S.bPick)) S.bPick = null;
     return `
       ${rulesTop}
-      <div class="h-cap">${esc(qMain(q.text))}</div>
+      <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">${canSmart ? '谁是老实人' : `${esc(pname(b.smart))}在指认`}</h1>
+      <div class="qcard">${qBody(q)}</div>
       <p class="tip">只有 1 次机会，确认后立即揭晓。</p>
       <div class="cands">${cands.map(id => `<button class="cand ${S.bPick === id ? 'on' : ''}" data-act="b-cand" data-pid="${id}" ${canSmart ? '' : 'disabled'}>${esc(pname(id))}${id === my ? '（我）' : ''}${warnTag(b, id)}</button>`).join('')}</div>
       <div class="push stack">${canSmart ? `<button class="btn b1" data-act="b-pick" ${S.bPick ? '' : 'disabled'}>${S.bPick ? `确定是${esc(pname(S.bPick))}` : '先选一个人'}</button><p class="note">确定后不能改</p>` : ''}</div>
@@ -782,6 +787,11 @@ function setData(d) {
   const first = !S.data;
   const cue = roomSound(S.data, d);
   S.data = d;
+  const bluff = d.state.bluff;
+  const night = myGame() === 'bluff' && bluff?.smart === d.me &&
+    ['roles', 'think'].includes(bluff.phase) && !bluff.away?.length &&
+    !(d.state.paused && d.state.paused_game === 'bluff');
+  sound.setNight(night);
   if (cue === 'reveal' && S.rolling && myGame() === 'dice') S.rollRevealCue = true;
   else if (cue) sound.play(cue);
   const kingKey = d.state?.king?.key || null;
@@ -818,9 +828,9 @@ async function refresh() {
   const r = await A.act(S.code, S.token, 'state', {});
   inflight = false;
   if (pending) { pending = false; setTimeout(refresh, 0); }
-  if (r && r.error === 'network') { if (!S.offline) { S.offline = true; render(); } return; }
+  if (r && r.error === 'network') { sound.setNight(false); if (!S.offline) { S.offline = true; render(); } return; }
   if (S.offline) { S.offline = false; S.sig = ''; }
-  if (r && r.error === 'not_member') { LS.del(tokKey(S.code)); stopRoom(); S.view = 'name'; render(); return; }
+  if (r && r.error === 'not_member') { sound.setNight(false); LS.del(tokKey(S.code)); stopRoom(); S.view = 'name'; render(); return; }
   if (r && r.error === 'not_found') { stopRoom(); goHome('房间不在了'); return; }
   setData(r);
 }
@@ -863,12 +873,14 @@ function tick() {
 
 // ---------- 页面跳转 ----------
 function goHome(err) {
+  sound.setNight(false);
   stopRoom(); S.view = 'home'; S.code = null; S.data = null; S.sig = ''; S.sheet = null;
   const u = new URL(location.href); u.searchParams.delete('r'); history.replaceState(null, '', u);
   render();
   if (err) { const e = $('#homeErr'); if (e) e.textContent = err; }
 }
 async function enterRoom(code) {
+  sound.setNight(false);
   S.code = code; S.data = null; S.sig = ''; S.lastNotice = null; S.sheet = null;
   const u = new URL(location.href); u.searchParams.set('r', code); history.replaceState(null, '', u);
   const tok = LS.get(tokKey(code));

@@ -60,6 +60,7 @@ create table if not exists public.ldc_questions (
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
 );
+alter table public.ldc_questions add column if not exists hints jsonb;
 create index if not exists ldc_questions_pick_idx on public.ldc_questions (game_type, qtype, category) where enabled;
 alter table public.ldc_questions enable row level security;
 revoke all on public.ldc_questions from anon, authenticated;
@@ -224,7 +225,7 @@ end $$;
 -- ---------- 瞎掰王 ----------
 -- 阶段：setup 设置 → recruit 招募大聪明 → roles 看身份 → choose 大聪明二选一 → think 准备（老实人记答案）
 --       → speak 大聪明点人发言（可发警告牌） → guess 指认（1 次） → reveal 揭晓 → final 最终排名
--- 题库 bank：idiom 冷门成语 / word 生僻词汇 / allusion 历史典故 / mix 综合随机（以上三类） / story 故事
+-- 题库 bank：mix 知识题 / story 故事
 create or replace function public._ldc_bluff_init() returns jsonb
 language sql immutable as $$
   select jsonb_build_object('phase', 'setup', 'bank', 'mix', 'mode', 'knowledge', 'think', 30, 'timer', 180,
@@ -269,12 +270,10 @@ language sql volatile as $$ select null::jsonb $$;   -- 旧函数，已不用
 -- 给大聪明的两道候选题（只有题目，不带答案）。这个房间玩过的题（used_q）不再出；p_not 里的（上一批）排最后
 create or replace function public._ldc_bluff_two(st jsonb, p_not jsonb) returns jsonb
 language sql volatile as $$
-  select coalesce(jsonb_agg(jsonb_build_object('id', id, 'cat', category, 'text', content)), '[]'::jsonb) from (
-    select id, category, content from public.ldc_questions, (select coalesce(st->'bluff'->>'bank', 'mix') as bk) k
+  select coalesce(jsonb_agg(jsonb_build_object('id', id, 'text', content)), '[]'::jsonb) from (
+    select id, content from public.ldc_questions
     where enabled and game_type = 'bluff'
-      and ((k.bk = 'story' and qtype = 'story')
-        or (k.bk <> 'story' and qtype = 'knowledge' and (k.bk = 'mix' or category =
-              case k.bk when 'idiom' then '冷门成语' when 'word' then '冷门词汇' when 'allusion' then '历史典故' end)))
+      and qtype = case when st->'bluff'->>'bank' = 'story' then 'story' else 'knowledge' end
       and not (coalesce(st->'used_q', '[]'::jsonb) ? id)
     order by coalesce(p_not, '[]'::jsonb) ? id, random() limit 2) z $$;
 
@@ -305,7 +304,8 @@ declare q public.ldc_questions; b jsonb := st->'bluff'; now_ms bigint := public.
 begin
   select * into q from public.ldc_questions where id = p_id and game_type = 'bluff';
   if not found then return st; end if;
-  b := b || jsonb_build_object('q', jsonb_build_object('id', q.id, 'cat', q.category, 'text', q.content, 'answer', q.answer, 'explain', q.explanation),
+  b := b || jsonb_build_object('q', jsonb_build_object('id', q.id, 'text', q.content, 'answer', q.answer, 'explain', q.explanation,
+           'hints', public._ldc_shuffle(q.hints)),
          'choices', '[]'::jsonb, 'phase', 'think', 'ready', '[]'::jsonb, 'spoken', '[]'::jsonb, 'cur', null, 'skipped', '[]'::jsonb,
          'timer_left', null, 'timer_end', now_ms + public._ldc_bluff_think(b) * 1000);
   st := st || jsonb_build_object('used_q', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb) from

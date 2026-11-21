@@ -7,6 +7,8 @@ const volume = 0.25;
 let enabled = true;
 try { enabled = localStorage.getItem(preference) !== 'off'; } catch (e) {}
 let context, master, noise;
+let nightWanted = false, nightSource, nightGain, nightBuffer, nightLoading;
+const nightUrl = new URL('night.m4a?v=1', document.currentScript.src);
 
 async function unlock() {
   if (!enabled) return;
@@ -21,6 +23,7 @@ async function unlock() {
       noise = null;
     }
     if (context.state !== 'running') await context.resume();
+    syncNight();
   } catch (e) { /* 被浏览器限制时，保留静音的游戏体验。 */ }
 }
 
@@ -92,13 +95,65 @@ function play(name) {
   cues[name](context.currentTime + 0.01);
 }
 
+function stopNight() {
+  if (!nightSource) return;
+  const now = context.currentTime;
+  nightGain.gain.cancelScheduledValues(now);
+  nightGain.gain.setTargetAtTime(0, now, 0.02);
+  nightSource.stop(now + 0.075);
+  nightSource = null;
+  nightGain = null;
+}
+
+function syncNight() {
+  if (!nightWanted || !enabled || document.hidden || context?.state !== 'running') {
+    stopNight();
+    return;
+  }
+  if (nightSource) return;
+  if (!nightBuffer) {
+    if (nightLoading) return;
+    nightLoading = fetch(nightUrl).then(response => {
+      if (!response.ok) throw new Error('音频无法载入');
+      return response.arrayBuffer();
+    }).then(data => context.decodeAudioData(data)).then(buffer => {
+      nightBuffer = buffer;
+    }).catch(() => {}).finally(() => {
+      nightLoading = null;
+      if (nightBuffer) syncNight();
+    });
+    return;
+  }
+  const source = context.createBufferSource();
+  const gain = context.createGain();
+  const now = context.currentTime;
+  source.buffer = nightBuffer;
+  source.loop = true;
+  gain.gain.setValueAtTime(0, now);
+  gain.gain.linearRampToValueAtTime(0.8, now + 0.09);
+  source.connect(gain);
+  gain.connect(master);
+  source.onended = () => { source.disconnect(); gain.disconnect(); };
+  source.start(now);
+  nightSource = source;
+  nightGain = gain;
+}
+
+function setNight(active) {
+  if (nightWanted === active) return;
+  nightWanted = active;
+  syncNight();
+}
+
 function toggle() {
   enabled = !enabled;
   try { localStorage.setItem(preference, enabled ? 'on' : 'off'); } catch (e) {}
   if (master) master.gain.setValueAtTime(enabled ? volume : 0, context.currentTime);
-  if (enabled) unlock().then(() => play('turn'));
+  if (enabled) unlock().then(() => { if (!nightWanted) play('turn'); });
+  else syncNight();
 }
 
 document.addEventListener('click', unlock, { capture: true });
-window.LdcSound = { play, toggle, get enabled() { return enabled; } };
+document.addEventListener('visibilitychange', syncNight);
+window.LdcSound = { play, toggle, setNight, get enabled() { return enabled; } };
 })();

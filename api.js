@@ -160,13 +160,12 @@ function bluffAssign(b) {
   return { ...b, ...bluffFresh(), phase: 'roles', roles, order: shuffle(others),
     warns_left: b.warn_on !== false ? (n <= 4 ? 0 : n <= 8 ? 1 : 2) : 0 };
 }
-const BANK_CAT = { idiom: '冷门成语', word: '冷门词汇', allusion: '历史典故' };
-const bankHas = (bk, q) => (bk === 'story' ? q.type === 'story' : q.type === 'knowledge' && (bk === 'mix' || q.cat === BANK_CAT[bk]));
+const bankHas = (bk, q) => q.type === (bk === 'story' ? 'story' : 'knowledge');
 // 给大聪明的两道候选题（只有题目）：这个房间玩过的题不再出，notIds（上一批）排最后
 function bluffTwo(st, notIds = []) {
   const used = st.used_q || [], bk = st.bluff.bank || 'mix', rank = q => (notIds.includes(q.id) ? 1 : 0);
   const Q = shuffle((window.LDC_QUESTIONS || []).filter(q => q.game === 'bluff' && bankHas(bk, q) && !used.includes(q.id)));
-  return Q.sort((x, y) => rank(x) - rank(y)).slice(0, 2).map(q => ({ id: q.id, cat: q.cat, text: q.text }));
+  return Q.sort((x, y) => rank(x) - rank(y)).slice(0, 2).map(q => ({ id: q.id, text: q.text }));
 }
 // 每人发言秒数（1/2/3 分钟或 0 = 不限时，默认 3 分钟）、准备秒数（默认 30 秒）
 const bluffSecs = b => ([0, 60, 120, 180].includes(b.timer) ? b.timer : 180);
@@ -181,7 +180,7 @@ function bluffStep(b) {
 function bluffBegin(st, id) {
   const q = (window.LDC_QUESTIONS || []).find(x => x.id === id && x.game === 'bluff'), b = st.bluff;
   if (!q) return st;
-  st.bluff = { ...b, q: { id: q.id, cat: q.cat, text: q.text, answer: q.answer, explain: q.explain }, choices: [], phase: 'think', ready: [],
+  st.bluff = { ...b, q: { id: q.id, text: q.text, answer: q.answer, explain: q.explain, hints: shuffle(q.hints || []) }, choices: [], phase: 'think', ready: [],
     spoken: [], cur: null, skipped: [], timer_left: null, timer_end: Date.now() + bluffThink(b) * 1000 };
   st.used_q = [q.id, ...(st.used_q || [])].slice(0, 400);
   return st;
@@ -690,7 +689,7 @@ function subscribe(code, onBump) {
 }
 function bump(code) { const ch = channels[code]; if (ch) try { ch.send(); } catch (e) {} }
 
-if (MOCK && !window.LDC_QUESTIONS) { const sc = document.createElement('script'); sc.src = 'questions.js'; document.head.appendChild(sc); }
+if (MOCK && !window.LDC_QUESTIONS) { const sc = document.createElement('script'); sc.src = 'questions.js?v=3'; document.head.appendChild(sc); }
 
 mock.__two = bluffTwo;   // 只给测试用
 window.LdcApi = { MOCK, GAMES_READY, ...(MOCK ? mock : real), subscribe, bump, _mock: mock };
