@@ -18,6 +18,7 @@ const phases = {
 const roles = { smart: '大聪明', honest: '老实人', bluffer: '捣蛋鬼' };
 const cancelled = Symbol('control request cancelled');
 let session, snapshot, pending = false, filterState;
+let refreshing = false, operation = 0;
 
 room.value = params.get('r') || '';
 function consumeLinkKey() {
@@ -100,11 +101,11 @@ function exit(message = '') {
   render();
 }
 
-async function request(action, code, id) {
+async function request(action, code, id, isCurrent = () => true) {
   const current = session;
   if (!current) throw cancelled;
   const result = await LdcApi.bluffControl(code, current.key, action, id);
-  if (session !== current) throw cancelled;
+  if (session !== current || !isCurrent()) throw cancelled;
   if (!result?.ok) {
     const message = messages[result?.error] || '操作失败，请重试';
     if (result?.error === 'forbidden') exit(message);
@@ -115,6 +116,7 @@ async function request(action, code, id) {
 
 async function run(work) {
   if (!session || pending) return;
+  operation++;
   pending = true;
   form.querySelector('button').disabled = true;
   choices();
@@ -146,16 +148,35 @@ async function loadRoom(code) {
   render();
 }
 
-async function sync(action = 'view', id) {
+async function refresh() {
+  if (!session?.room || !session.verified || pending || refreshing) return;
+  const current = session;
+  const version = operation;
+  const isCurrent = () => session === current && operation === version;
+  refreshing = true;
+  try {
+    const result = await request('view', current.room, undefined, isCurrent);
+    if (!isCurrent()) return;
+    if ($('status').textContent === messages.network) $('status').textContent = '';
+    if (JSON.stringify(result) !== JSON.stringify(snapshot)) {
+      snapshot = result;
+      render();
+    }
+  } catch (error) {
+    if (error !== cancelled && isCurrent()) $('status').textContent = error.message;
+  } finally {
+    refreshing = false;
+  }
+}
+
+async function updateQuestion(action, id) {
   if (!session?.room || !session.verified) return;
   await run(async () => {
     const current = session;
     const result = await request(action, current.room, id);
     if (session !== current) return;
     snapshot = result;
-    if (action === 'select') $('status').textContent = '题目已指定';
-    else if (action === 'clear') $('status').textContent = '已取消指定';
-    else if ($('status').textContent === messages.network) $('status').textContent = '';
+    $('status').textContent = action === 'select' ? '题目已指定' : '已取消指定';
     render();
   });
 }
@@ -203,11 +224,11 @@ $('copy').addEventListener('click', async () => {
 });
 $('search').addEventListener('input', choices);
 questions.addEventListener('change', choices);
-$('select').addEventListener('click', () => sync('select', questions.value));
-$('clear').addEventListener('click', () => sync('clear'));
+$('select').addEventListener('click', () => updateQuestion('select', questions.value));
+$('clear').addEventListener('click', () => updateQuestion('clear'));
 $('exit').addEventListener('click', () => exit());
-setInterval(() => { if (!document.hidden) sync(); }, 2500);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) sync(); });
+setInterval(() => { if (!document.hidden) refresh(); }, 2500);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 function loginFromHash() {
   if (pending) return;
   const secret = consumeLinkKey();
