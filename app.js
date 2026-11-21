@@ -427,10 +427,10 @@ function bluffRules(open, act) {
       <li><strong>报名与分配身份。</strong>系统从自愿报名的玩家中随机选出大聪明。无人报名时，从本轮玩家中随机选出一人。随后分配老实人和捣蛋鬼。</li>
       <li><strong>选题与准备。</strong>大聪明从候选题中选一道。知识题附有三个公开提示，其中一条符合题意，两条是干扰项。正确解释仅在准备阶段向老实人开放，揭晓时向全体玩家公布。故事题根据题面准备发言。</li>
       <li><strong>发言。</strong>大聪明逐一点名，每位被点到的玩家发言一次。发言结束或计时到期后，由大聪明指定下一位。</li>
-      <li><strong>指认与揭晓。</strong>所有人发言结束后，大聪明有一次机会指认老实人。确认后立即揭晓身份并结算本轮积分。</li>
+      <li><strong>指认与揭晓。</strong>所有人发言结束且警告牌全部发出后，大聪明有一次机会指认老实人。确认后立即揭晓身份并结算本轮积分。</li>
     </ol>
     <h2 id="bluff-warning-title">警告牌</h2>
-    <p>大聪明可以在指认前向怀疑的玩家发出警告牌。同一轮内，每位玩家最多收到一张。警告牌数量按本轮人数分配，发出时只记录，本轮结束后结算。</p>
+    <p>发言环节中，大聪明可以随时向任意候选玩家发出警告牌，不受当前发言者限制。同一轮内，每位玩家最多收到一张。警告牌按本轮人数分配，须在指认前全部发出，分数在本轮结束后结算。</p>
     <table class="bluff-warnings" aria-labelledby="bluff-warning-title">
       <thead><tr><th scope="col">本轮人数</th><th scope="col">警告牌</th></tr></thead>
       <tbody>
@@ -611,8 +611,12 @@ function bluffHTML() {
     }).join('');
     const myRole = (b.roles || {})[my];
     let head, act;
-    if (!cur) {
-      const left = (b.order || []).filter(id => !spoken.includes(id));
+    const left = (b.order || []).filter(id => !spoken.includes(id));
+    const allSpoken = !cur && !left.length;
+    if (allSpoken) {
+      head = '发言结束';
+      act = `<p class="tip">${isSmart ? '请发出剩余的警告牌，再进入指认。' : '等待大聪明发出剩余的警告牌。'}</p>`;
+    } else if (!cur) {
       head = canSmart ? '点下一位' : `${esc(pname(b.smart))}在点下一位`;
       act = canSmart ? `<p class="tip">每人解释一次，不能打断。点谁谁说。</p><div class="cands">${left.map(id => `<button class="cand" data-act="b-call" data-pid="${id}">${esc(pname(id))}${id === my ? '（我）' : ''}</button>`).join('')}</div>` : '';
     } else {
@@ -632,7 +636,7 @@ function bluffHTML() {
       <div class="push stack" style="margin-top:12px">${act}</div>
       <div class="list" style="margin-top:12px">${rows}</div>
       ${warnBox()}
-      ${links(true)}`;
+      ${links(!allSpoken)}`;
   }
   if (b.phase === 'guess') {
     const cands = b.order || [];
@@ -645,7 +649,6 @@ function bluffHTML() {
       <p class="tip">只有 1 次机会，确认后立即揭晓。</p>
       <div class="cands">${cands.map(id => `<button class="cand ${S.bPick === id ? 'on' : ''}" data-act="b-cand" data-pid="${id}" ${canSmart ? '' : 'disabled'}>${esc(pname(id))}${id === my ? '（我）' : ''}${warnTag(b, id)}</button>`).join('')}</div>
       <div class="push stack">${canSmart ? `<button class="btn b1" data-act="b-pick" ${S.bPick ? '' : 'disabled'}>${S.bPick ? `确定是${esc(pname(S.bPick))}` : '先选一个人'}</button><p class="note">确定后不能改</p>` : ''}</div>
-      ${warnBox()}
       ${links(false)}`;
   }
   if (b.phase === 'reveal') {

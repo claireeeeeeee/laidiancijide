@@ -294,13 +294,12 @@ create or replace function public._ldc_bluff_think(b jsonb) returns int
 language sql immutable as $$
   select case when (b->>'think') in ('30', '60', '120') then (b->>'think')::int else 30 end $$;
 
--- 当前发言的人说完了：记进已发言，等大聪明点下一位；全部说完进入指认
+-- 结束一次发言。进入指认由 _ldc_bluff_settle 统一判断。
 create or replace function public._ldc_bluff_step(b jsonb, now_ms bigint) returns jsonb
 language plpgsql volatile as $$
 declare sp jsonb := public._ldc_add(coalesce(b->'spoken', '[]'::jsonb), b->>'cur');
 begin
   b := b || jsonb_build_object('spoken', sp, 'cur', null, 'timer_end', null, 'timer_left', null);
-  if public._ldc_subset(b->'order', sp) then b := b || '{"phase":"guess"}'::jsonb; end if;
   return b;
 end $$;
 
@@ -391,6 +390,10 @@ begin
   if b->>'phase' = 'guess' and b->'wrong'->>0 is not null then
     return jsonb_set(st, '{bluff}', public._ldc_bluff_finish(b, b->'wrong'->>0, false));
   end if;
+  -- 旧版尚未指认且仍有警告牌的回合，继续等待最后的发牌。
+  if b->>'phase' = 'guess' and coalesce((b->>'warns_left')::int, 0) > 0 then
+    b := b || '{"phase":"speak"}'::jsonb;
+  end if;
   -- 整轮保留原名单。离开页面或断线时冻结进度，原玩家回来后接着计时。
   if b->>'phase' in ('recruit', 'roles', 'choose', 'think', 'speak', 'guess') then
     away := public._ldc_minus(b->'players', online);
@@ -437,6 +440,10 @@ begin
   elsif b->>'phase' = 'speak' then
     if b->>'cur' is not null and jsonb_typeof(b->'timer_end') = 'number' and now_ms >= (b->>'timer_end')::bigint then
       b := public._ldc_bluff_step(b, now_ms);
+    end if;
+    if b->>'cur' is null and coalesce((b->>'warns_left')::int, 0) = 0
+        and public._ldc_subset(b->'order', coalesce(b->'spoken', '[]'::jsonb)) then
+      b := b || '{"phase":"guess"}'::jsonb;
     end if;
   end if;
   return jsonb_set(st, '{bluff}', b);
@@ -830,7 +837,8 @@ begin
       if st->(st->>'game') is null then err := 'no_game'; end if;
     elsif k in ('bluff_redraw', 'bluff_void') then
       if st->>'game' <> 'bluff' or st->'bluff'->>'phase' not in ('roles', 'choose', 'think', 'speak', 'guess')
-         or (k = 'bluff_redraw' and st->'bluff'->>'phase' = 'guess') then err := 'phase'; end if;
+         or (k = 'bluff_redraw' and (st->'bluff'->>'phase' = 'guess' or
+           (st->'bluff'->>'phase' = 'speak' and _ldc_subset(st->'bluff'->'order', st->'bluff'->'spoken')))) then err := 'phase'; end if;
     else err := 'bad_kind';
     end if;
     if err is null then
@@ -1075,10 +1083,10 @@ begin
         bl := _ldc_bluff_step(bl, now_ms);
       end if;
 
-    -- 警告牌：只有大聪明能发，必须在指认之前；每人每轮最多一张，不能撤回
+    -- 警告牌：大聪明可在发言环节给任意候选人发牌。
     elsif p_action = 'b_warn' then
       t := a->>'player';
-      if bl->>'phase' not in ('speak', 'guess') then err := 'phase';
+      if bl->>'phase' <> 'speak' then err := 'phase';
       elsif bl->>'smart' <> me then err := 'not_yours';
       elsif coalesce((bl->>'warns_left')::int, 0) <= 0 then err := 'no_warns';
       elsif t is null or not (bl->'order' ? t) or coalesce(bl->'warned', '[]'::jsonb) ? t then err := 'bad_target';

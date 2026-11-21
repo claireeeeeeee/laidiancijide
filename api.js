@@ -180,12 +180,9 @@ function bluffTwo(st, notIds = []) {
 // 每人发言秒数（1/2/3 分钟或 0 = 不限时，默认 3 分钟）、准备秒数（默认 30 秒）
 const bluffSecs = b => ([0, 60, 120, 180].includes(b.timer) ? b.timer : 180);
 const bluffThink = b => ([30, 60, 120].includes(b.think) ? b.think : 30);
-// 当前发言的人说完了：等大聪明点下一位；全部说完进入指认
+// 结束一次发言。进入指认由 bluffSettle 统一判断。
 function bluffStep(b) {
-  const spoken = add(b.spoken || [], b.cur);
-  b = { ...b, spoken, cur: null, timer_end: null, timer_left: null };
-  if (subset(b.order, spoken)) b.phase = 'guess';
-  return b;
+  return { ...b, spoken: add(b.spoken || [], b.cur), cur: null, timer_end: null, timer_left: null };
 }
 function bluffBegin(st, id) {
   const q = (window.LDC_QUESTIONS || []).find(x => x.id === id && x.game === 'bluff'), b = st.bluff;
@@ -228,6 +225,7 @@ function bluffSettle(st, online) {
     st.bluff = bluffFinish(b, b.wrong[0], false);
     return st;
   }
+  if (b.phase === 'guess' && b.warns_left > 0) b.phase = 'speak';
   const now = Date.now();
   if (['recruit', 'roles', 'choose', 'think', 'speak', 'guess'].includes(b.phase)) {
     const away = (b.players || []).filter(id => !online.includes(id));
@@ -266,6 +264,7 @@ function bluffSettle(st, online) {
       b = { ...b, phase: 'speak', cur: null, timer_left: null, timer_end: null };
   } else if (b.phase === 'speak') {
     if (b.cur && typeof b.timer_end === 'number' && now >= b.timer_end) b = bluffStep(b);
+    if (!b.cur && !(b.warns_left > 0) && subset(b.order, b.spoken || [])) b.phase = 'guess';
   }
   st.bluff = b; return st;
 }
@@ -504,7 +503,7 @@ const mock = {
       } else if (k === 'restart_round') { if (!st[st.game]) err = 'no_game'; }
       else if (k === 'bluff_redraw' || k === 'bluff_void') {
         const ph = st.bluff && st.bluff.phase;
-        if (st.game !== 'bluff' || !['roles', 'choose', 'think', 'speak', 'guess'].includes(ph) || (k === 'bluff_redraw' && ph === 'guess')) err = 'phase';
+        if (st.game !== 'bluff' || !['roles', 'choose', 'think', 'speak', 'guess'].includes(ph) || (k === 'bluff_redraw' && (ph === 'guess' || (ph === 'speak' && subset(st.bluff.order, st.bluff.spoken || []))))) err = 'phase';
       }
       else err = 'bad_kind';
       if (!err) {
@@ -655,7 +654,7 @@ const mock = {
           b = bluffStep(b);
         }
       } else if (action === 'b_warn') {
-        if (!(b.phase === 'speak' || b.phase === 'guess')) err = 'phase';
+        if (b.phase !== 'speak') err = 'phase';
         else if (b.smart !== me) err = 'not_yours';
         else if (!(b.warns_left > 0)) err = 'no_warns';
         else if (!a.player || !b.order.includes(a.player) || (b.warned || []).includes(a.player)) err = 'bad_target';
