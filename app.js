@@ -415,26 +415,42 @@ const qBody = q => `<p>${esc(qMain(q.text))}</p>${q.hints?.length
 // 规则卡：设置页默认展开；游戏中点底部「规则」打开
 function bluffRules(open, act) {
   return `<div class="rules"><button class="rules-h" data-act="${act}">怎么玩<span>${open ? '收起' : '展开'}</span></button>${!open ? '' : `<div class="rules-b">
-    <p>一本正经地胡说八道，以假乱真。3–12 人。</p>
-    <p><b class="t-smart">大聪明</b>（1 人）不知道答案。选题、安排谁先说、可以发警告牌，最后找出唯一的老实人。身份大家都知道。</p>
-    <p><b class="t-honest">老实人</b>（1 人）唯一能看到正确解释的人。准备时间里记住，开始发言后手机上就看不到了。照真的说，可以用自己的话，但不能编。</p>
-    <p><b class="t-bluffer">捣蛋鬼</b>（其余的人）看不到答案，现场编一个像真的解释：意思、来历、背后的故事都可以编。</p>
-    <p><b>流程</b>报名当大聪明 → 看身份 → 大聪明二选一选题 → 准备 → 大聪明点人，每人解释一次，不能打断 → 指认 → 揭晓。</p>
-    <p><b>提示</b>知识题有三个公开提示，一真两假。故事题按题面讲真事或编故事。</p>
-    <p><b>指认</b>每轮只猜一次，确认后立即揭晓。</p>
-    <p><b>警告牌</b>3–4 人 0 张，5–8 人 1 张，9–12 人 2 张。指认前发，同一人每轮最多收一张。</p>
+    <p><strong>适合 3–12 人。每轮由大聪明听取其他玩家的发言，并从中找出唯一的老实人。</strong></p>
+    <h2>角色</h2>
+    <ul>
+      <li><strong class="t-smart">大聪明（1 人）</strong>：身份公开。负责选题、安排发言顺序，并在发言结束后指认老实人。</li>
+      <li><strong class="t-honest">老实人（1 人）</strong>：身份保密。知识题中，根据正确解释发言；故事题中，讲述一件真实发生的事。</li>
+      <li><strong class="t-bluffer">捣蛋鬼（其余玩家）</strong>：身份保密。知识题中，编出一个可信的解释；故事题中，编出一段符合题意的经历。目标是让大聪明相信你是老实人。</li>
+    </ul>
+    <h2>回合流程</h2>
+    <ol>
+      <li><strong>报名与分配身份。</strong>系统从自愿报名的玩家中随机选出大聪明。无人报名时，从本轮玩家中随机选出一人。随后分配老实人和捣蛋鬼。</li>
+      <li><strong>选题与准备。</strong>大聪明从候选题中选一道。知识题附有三个公开提示，其中一条符合题意，两条是干扰项。正确解释仅在准备阶段向老实人开放，揭晓时向全体玩家公布。故事题根据题面准备发言。</li>
+      <li><strong>发言。</strong>大聪明逐一点名，每位被点到的玩家发言一次。发言结束或计时到期后，由大聪明指定下一位。</li>
+      <li><strong>指认与揭晓。</strong>所有人发言结束后，大聪明有一次机会指认老实人。确认后立即揭晓身份并结算本轮积分。</li>
+    </ol>
+    <h2 id="bluff-warning-title">警告牌</h2>
+    <p>大聪明可以在指认前向怀疑的玩家发出警告牌。同一轮内，每位玩家最多收到一张。警告牌数量按本轮人数分配，发出时只记录，本轮结束后结算。</p>
+    <table class="bluff-warnings" aria-labelledby="bluff-warning-title">
+      <thead><tr><th scope="col">本轮人数</th><th scope="col">警告牌</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">3–4 人</th><td>0 张</td></tr>
+        <tr><th scope="row">5–8 人</th><td>1 张</td></tr>
+        <tr><th scope="row">9–12 人</th><td>2 张</td></tr>
+      </tbody>
+    </table>
     <table class="bluff-points">
-      <caption>计分</caption>
+      <caption>积分</caption>
       <thead><tr><th scope="col">本轮结果</th><th scope="col">大聪明</th><th scope="col">老实人</th><th scope="col">捣蛋鬼</th></tr></thead>
       <tbody>
-        <tr><th scope="row">猜中（3–6 人）</th><td>+1</td><td>+1</td><td>—</td></tr>
-        <tr><th scope="row">猜中（7–12 人）</th><td>+2</td><td>+1</td><td>—</td></tr>
-        <tr><th scope="row">猜错</th><td>0</td><td>—</td><td>被指认 +1</td></tr>
-        <tr><th scope="row">警告捣蛋鬼</th><td>+1</td><td>—</td><td>被警告 −1</td></tr>
+        <tr><th scope="row">指认正确（3–6 人）</th><td>+1</td><td>+1</td><td>—</td></tr>
+        <tr><th scope="row">指认正确（7–12 人）</th><td>+2</td><td>+1</td><td>—</td></tr>
+        <tr><th scope="row">指认错误</th><td>0</td><td>—</td><td>被指认者 +1</td></tr>
+        <tr><th scope="row">警告捣蛋鬼</th><td>+1</td><td>—</td><td>被警告者 −1</td></tr>
         <tr><th scope="row">警告老实人</th><td>−3</td><td>−1</td><td>—</td></tr>
       </tbody>
     </table>
-    <p>同一轮得分叠加，允许负分。作废轮不计分。</p>
+    <p>同一轮的加减分可以叠加，积分可以为负。作废轮不计分。游戏结束后按总分排名，同分并列。</p>
   </div>`}</div>`;
 }
 function roleTip(role, mode) {
@@ -737,7 +753,7 @@ function sheetHTML() {
 function menuHTML() {
   if (!S.menu) return '';
   const cur = document.documentElement.dataset.skin;
-  return `<div class="menu" role="menu"><div class="skin-scope">皮肤 · 仅本机</div>${SKINS.map(([k, n]) => `<button role="menuitemradio" aria-checked="${k === cur}" data-act="set-skin" data-skin="${k}">
+  return `<div class="menu" role="menu">${SKINS.map(([k, n]) => `<button role="menuitemradio" aria-checked="${k === cur}" data-act="set-skin" data-skin="${k}">
     <i style="background:${k === 'night' ? 'linear-gradient(135deg,#FF4FA3 50%,#3EE6E0 50%)' : k === 'oc' ? 'linear-gradient(135deg,#FF9A3C 50%,#104E8B 50%)' : 'linear-gradient(135deg,#FFCEE3 0 33%,#678EC9 33% 66%,#262277 66%)'}"></i>${n}</button>`).join('')}
     <button class="sound-toggle" role="menuitemcheckbox" aria-checked="${sound.enabled}" data-act="sound-toggle">音效 <span>${sound.enabled ? '开' : '关'}</span></button></div>`;
 }

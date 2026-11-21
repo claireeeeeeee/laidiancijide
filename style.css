@@ -174,7 +174,6 @@ body{min-height:100vh;min-height:100dvh;background:var(--bg-solid);background-im
 .menu button{display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;font-size:15px;padding:10px;border-radius:10px;text-align:left}
 .menu button i{width:22px;height:22px;border-radius:50%;flex:none}
 .menu button[aria-checked="true"]{background:var(--line)}
-.menu .skin-scope{padding:6px 10px;font-size:12px;color:var(--muted)}
 .menu .sound-toggle{justify-content:space-between;margin-top:4px;font-weight:600}
 .menu .sound-toggle span{font-size:13px;color:var(--muted)}
 .toast{position:fixed;left:50%;top:calc(env(safe-area-inset-top) + 14px);transform:translateX(-50%);z-index:50;background:var(--ink);color:var(--bg-solid);
@@ -302,14 +301,16 @@ textarea.king-field{resize:vertical}
 .rules-h span{font-size:13px;font-weight:500;color:var(--muted)}
 .rules-b{padding:0 16px 12px;font-size:14px;line-height:1.65;color:var(--ink)}
 .rules-b p{margin-top:6px}
-.rules-b b{margin-right:6px}
-.bluff-points{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px;line-height:1.4}
+.rules-b h2{font-size:15px;margin-top:14px}
+.rules-b ul,.rules-b ol{padding-inline-start:1.4em;margin-top:4px}
+.rules-b li+li{margin-top:4px}
+:is(.bluff-points,.bluff-warnings){width:100%;border-collapse:collapse;margin-top:10px;font-size:13px;line-height:1.4}
 .bluff-points caption{text-align:left;font-weight:700;font-size:14px;padding-bottom:6px}
-.bluff-points th,.bluff-points td{padding:7px 4px;border-bottom:1px solid var(--line);text-align:center}
-.bluff-points th:first-child{text-align:left}
-.bluff-points thead th{background:var(--surface-solid);white-space:nowrap}
-.bluff-points tbody th{font-weight:500}
-.bluff-points td{font-variant-numeric:tabular-nums}
+:is(.bluff-points,.bluff-warnings) :is(th,td){padding:7px 4px;border-bottom:1px solid var(--line);text-align:center}
+:is(.bluff-points,.bluff-warnings) th:first-child{text-align:left}
+:is(.bluff-points,.bluff-warnings) thead th{background:var(--surface-solid);white-space:nowrap}
+:is(.bluff-points,.bluff-warnings) tbody th{font-weight:500}
+:is(.bluff-points,.bluff-warnings) td{font-variant-numeric:tabular-nums}
 .t-smart{color:var(--a3)} .t-honest{color:var(--a2)} .t-bluffer{color:var(--a1)}
 [data-skin="sakura"] .t-smart{color:#c2185b}
 .tip{font-size:14px;line-height:1.6;color:var(--muted);margin:10px 0 0}
