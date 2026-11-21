@@ -174,6 +174,7 @@ body{min-height:100vh;min-height:100dvh;background:var(--bg-solid);background-im
 .menu button{display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;font-size:15px;padding:10px;border-radius:10px;text-align:left}
 .menu button i{width:22px;height:22px;border-radius:50%;flex:none}
 .menu button[aria-checked="true"]{background:var(--line)}
+.menu .skin-scope{padding:6px 10px;font-size:12px;color:var(--muted)}
 .menu .sound-toggle{justify-content:space-between;margin-top:4px;font-weight:600}
 .menu .sound-toggle span{font-size:13px;color:var(--muted)}
 .toast{position:fixed;left:50%;top:calc(env(safe-area-inset-top) + 14px);transform:translateX(-50%);z-index:50;background:var(--ink);color:var(--bg-solid);

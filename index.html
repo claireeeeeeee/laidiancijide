@@ -14,12 +14,20 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <!-- 字体不阻塞页面：加载不到（比如国内网络）就用系统字体 -->
 <link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&family=ZCOOL+XiaoWei&family=Noto+Sans+SC:wght@400;500;700;900&display=swap">
-<link rel="stylesheet" href="style.css?v=13">
+<link rel="stylesheet" href="style.css?v=14">
 <script>
-  // 先套上皮肤，避免闪一下
-  (function(){var k=null;try{k=localStorage.getItem('ldc_skin')}catch(e){}
-   if(!k){var h=new Date().getHours();k=(h>=19||h<6)?'night':'oc'}
-   document.documentElement.dataset.skin=k;})();
+  // 先套上本机皮肤，模拟模式下每个玩家分别保存。
+  (() => {
+    const params = new URLSearchParams(location.search);
+    const player = params.has('mock') && params.get('p');
+    let skin;
+    try { skin = localStorage.getItem('ldc_skin' + (player ? '_p' + player : '')); } catch (e) {}
+    if (!['night', 'oc', 'sakura'].includes(skin)) {
+      const hour = new Date().getHours();
+      skin = hour >= 19 || hour < 6 ? 'night' : 'oc';
+    }
+    document.documentElement.dataset.skin = skin;
+  })();
 </script>
 </head>
 <body>
@@ -31,6 +39,6 @@
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 <script src="api.js?v=16"></script>
 <script src="sounds.js?v=2"></script>
-<script src="app.js?v=15"></script>
+<script src="app.js?v=16"></script>
 </body>
 </html>

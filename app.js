@@ -14,6 +14,7 @@ const LS = {
 };
 const tokKey = code => 'ldc_tok_' + code + PS;
 const NAME_KEY = 'ldc_name' + PS;
+const SKIN_KEY = 'ldc_skin' + (Q.has('mock') ? PS : '');
 const ADMIN_KEY = 'ldc_admin';
 const GAMES = [
   { id: 'dice', name: '摇骰子', k: '骰', hl: 'hl1' },
@@ -92,7 +93,7 @@ async function copy(text) {
   }
 }
 function setSkin(k) {
-  document.documentElement.dataset.skin = k; LS.set('ldc_skin', k);
+  document.documentElement.dataset.skin = k; LS.set(SKIN_KEY, k);
   const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = k === 'night' ? '#1E1033' : k === 'oc' ? '#F3F7FC' : '#FFEAF3';
 }
 const skinBtn = () => `<button class="icon-btn round" data-act="skin" aria-label="皮肤和音效设置" aria-haspopup="true"><span class="skin-dot"></span></button>`;
@@ -736,7 +737,7 @@ function sheetHTML() {
 function menuHTML() {
   if (!S.menu) return '';
   const cur = document.documentElement.dataset.skin;
-  return `<div class="menu" role="menu">${SKINS.map(([k, n]) => `<button role="menuitemradio" aria-checked="${k === cur}" data-act="set-skin" data-skin="${k}">
+  return `<div class="menu" role="menu"><div class="skin-scope">皮肤 · 仅本机</div>${SKINS.map(([k, n]) => `<button role="menuitemradio" aria-checked="${k === cur}" data-act="set-skin" data-skin="${k}">
     <i style="background:${k === 'night' ? 'linear-gradient(135deg,#FF4FA3 50%,#3EE6E0 50%)' : k === 'oc' ? 'linear-gradient(135deg,#FF9A3C 50%,#104E8B 50%)' : 'linear-gradient(135deg,#FFCEE3 0 33%,#678EC9 33% 66%,#262277 66%)'}"></i>${n}</button>`).join('')}
     <button class="sound-toggle" role="menuitemcheckbox" aria-checked="${sound.enabled}" data-act="sound-toggle">音效 <span>${sound.enabled ? '开' : '关'}</span></button></div>`;
 }
