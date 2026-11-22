@@ -49,6 +49,13 @@
       <h2>本轮身份</h2>
       <div id="control-players"></div>
     </section>
+    <section class="control-section stack" id="control-honest-panel" hidden>
+      <h2>指定下一轮老实人</h2>
+      <p class="note" id="control-honest-status"></p>
+      <label>选择玩家<select class="king-field" id="control-honest-player"></select></label>
+      <button class="btn b1" type="button" id="control-set-honest" disabled>指定为老实人</button>
+      <button class="link" type="button" id="control-clear-honest" disabled>取消指定老实人</button>
+    </section>
     <section class="control-section" id="control-current" hidden>
       <h2>当前题目</h2>
       <p class="note" id="control-current-question"></p>
@@ -66,7 +73,7 @@
   </div>
 </main>
 <script src="config.js?v=7"></script>
-<script src="api.js?v=16"></script>
-<script src="control.js?v=2"></script>
+<script src="api.js?v=22"></script>
+<script src="control.js?v=4"></script>
 </body>
 </html>

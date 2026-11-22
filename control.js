@@ -4,20 +4,22 @@
 const $ = id => document.getElementById('control-' + id);
 const form = $('login'), room = $('room'), key = $('key'), questions = $('questions');
 const roomList = $('rooms'), create = $('create-room');
+const honestPlayer = $('honest-player');
 const keyStorage = 'ldc_bluff_control_session';
 const params = new URLSearchParams(location.search);
 const messages = {
   forbidden: '主持密钥不对', bad_code: '房间号须为六位数字', not_found: '找不到这个房间',
   bad_question: '这道题已用过或不在本房间的题库中', not_installed: '主持接口尚未上线',
+  bad_honest: '这位玩家已不在本次候选名单中，请重新选择',
   network: '同步暂时中断，请检查网络', code_taken: '这个房间号已存在', busy: '暂时无法生成房间号，请重试'
 };
 const phases = {
   setup: '设置', recruit: '报名', roles: '看身份', choose: '选题', think: '准备',
-  speak: '发言', guess: '指认', reveal: '揭晓', final: '最终排名'
+  speak: '讨论', guess: '指认', reveal: '揭晓', final: '最终排名'
 };
 const roles = { smart: '大聪明', honest: '老实人', bluffer: '捣蛋鬼' };
 const cancelled = Symbol('control request cancelled');
-let session, snapshot, pending = false, filterState;
+let session, snapshot, pending = false, filterState, honestOptions;
 let refreshing = false, operation = 0;
 
 room.value = params.get('r') || '';
@@ -44,6 +46,8 @@ function choices() {
   }
   $('select').disabled = !questions.value || pending;
   $('clear').disabled = !snapshot?.queued || pending;
+  $('set-honest').disabled = !honestPlayer.value || pending;
+  $('clear-honest').disabled = !snapshot?.queued_honest || pending;
   roomList.disabled = pending;
   create.querySelector('button').disabled = pending;
 }
@@ -54,6 +58,24 @@ function renderRoomList(rooms) {
     ...rooms.map(r => new Option(r.code + ' · ' + r.players + ' 人', r.code)));
   if (selected && !rooms.some(r => r.code === selected)) roomList.add(new Option(selected, selected));
   roomList.value = selected || '';
+}
+
+function renderHonest() {
+  $('honest-panel').hidden = !Object.hasOwn(snapshot, 'queued_honest');
+  if ($('honest-panel').hidden) return;
+  const candidates = snapshot.players.filter(p => p.can_pin_honest).map(({ id, name }) => ({ id, name }));
+  const signature = JSON.stringify(candidates);
+  if (signature !== honestOptions) {
+    const selected = honestPlayer.value;
+    honestPlayer.replaceChildren(new Option(candidates.length ? '请选择一位玩家' : '暂无符合条件的玩家', ''),
+      ...candidates.map(p => new Option(p.name, p.id)));
+    if (candidates.some(p => p.id === selected)) honestPlayer.value = selected;
+    honestOptions = signature;
+  }
+  const queued = snapshot.players.find(p => p.id === snapshot.queued_honest);
+  $('honest-status').textContent = snapshot.queued_honest
+    ? '已指定' + (queued ? '「' + queued.name + '」' : '的玩家已离开房间') + '。若未参加下一轮，将恢复随机分配。'
+    : '指定在下一次发放身份时生效一次。';
 }
 
 function render() {
@@ -77,6 +99,7 @@ function render() {
     return row;
   }));
   if (!snapshot.players.length) list.textContent = '还没有玩家加入';
+  renderHonest();
   const current = snapshot.current_question;
   $('current').hidden = !current?.text;
   $('current-question').textContent = current?.text || '';
@@ -91,11 +114,13 @@ function exit(message = '') {
   session = null;
   snapshot = null;
   filterState = null;
+  honestOptions = null;
   $('dashboard').hidden = true;
   form.hidden = false;
   key.value = '';
   try { sessionStorage.removeItem(keyStorage); } catch (e) {}
-  for (const id of ['players', 'rooms', 'questions', 'queued', 'round', 'current-question', 'current-answer']) $(id).replaceChildren();
+  for (const id of ['players', 'rooms', 'questions', 'queued', 'round', 'current-question', 'current-answer',
+    'honest-player', 'honest-status']) $(id).replaceChildren();
   $('search').value = '';
   $('status').textContent = message;
   render();
@@ -169,14 +194,14 @@ async function refresh() {
   }
 }
 
-async function updateQuestion(action, id) {
+async function updateRoom(action, id, message) {
   if (!session?.room || !session.verified) return;
   await run(async () => {
     const current = session;
     const result = await request(action, current.room, id);
     if (session !== current) return;
     snapshot = result;
-    $('status').textContent = action === 'select' ? '题目已指定' : '已取消指定';
+    $('status').textContent = message;
     render();
   });
 }
@@ -224,8 +249,11 @@ $('copy').addEventListener('click', async () => {
 });
 $('search').addEventListener('input', choices);
 questions.addEventListener('change', choices);
-$('select').addEventListener('click', () => updateQuestion('select', questions.value));
-$('clear').addEventListener('click', () => updateQuestion('clear'));
+honestPlayer.addEventListener('change', choices);
+$('select').addEventListener('click', () => updateRoom('select', questions.value, '题目已指定'));
+$('clear').addEventListener('click', () => updateRoom('clear', undefined, '已取消指定题目'));
+$('set-honest').addEventListener('click', () => updateRoom('set_honest', honestPlayer.value, '老实人已指定'));
+$('clear-honest').addEventListener('click', () => updateRoom('clear_honest', undefined, '已取消指定老实人'));
 $('exit').addEventListener('click', () => exit());
 setInterval(() => { if (!document.hidden) refresh(); }, 2500);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
