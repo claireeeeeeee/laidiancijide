@@ -7,7 +7,7 @@ const params = new URLSearchParams(location.search);
 const MOCK = params.has('mock') || !cfg.supabaseUrl || !cfg.supabaseAnonKey;
 const ONLINE_MS = 20000;
 const VOTE_MS = 20000;
-const GAMES_READY = ['dice', 'truth', 'king', 'bluff'];
+const GAMES_READY = ['dice', 'truth', 'king', 'bluff', 'undercover'];
 
 // ---------- 正式版 ----------
 async function rpc(fn, args) {
@@ -348,6 +348,92 @@ function settle(st, online) {
   if (st.bluff && pg !== 'bluff') st = bluffSettle(st, here(st, online, 'bluff'));
   return st;
 }
+const undercoverPairs = [
+  ['极光', '彩虹'],
+  ['自信', '自恋'],
+  ['霓裳羽衣曲', '惊鸿舞'],
+  ['网课', '网恋'],
+  ['滚滚长江东逝水', '大江东去浪淘尽'],
+  ['凤求凰', '白头吟'],
+  ['辣椒', '芥末'],
+  ['御姐', '甜妹'],
+  ['鲸鱼', '海豚'],
+  ['婚礼', '葬礼'],
+  ['床', '棺材'],
+  ['奶粉', '骨灰'],
+  ['红酒', '白酒'],
+  ['坐牢', '上学'],
+  ['葱花', '腋毛'],
+  ['扣篮', '猝死'],
+  ['痔疮', '口腔溃疡'],
+  ['玩偶', '尸体'],
+  ['初吻', '妈妈'],
+  ['口罩', '内裤'],
+  ['蛋挞', '痔疮'],
+  ['骨科', '男科'],
+  ['黑丝', '秋裤']
+];
+function undercoverAction(st, online, me, action, args) {
+  const u = st.undercover;
+  if (action === 'u_setup') {
+    if (!['setup', 'result'].includes(u.phase)) return 'phase';
+    if (typeof args.whiteboard !== 'boolean') return 'bad_action';
+    u.whiteboard_on = args.whiteboard;
+    return;
+  }
+  if (action === 'u_start') {
+    if (!['setup', 'result'].includes(u.phase)) return 'phase';
+    if (online.length < 4) return 'undercover_people';
+    const used = u.used?.length < undercoverPairs.length ? u.used : [];
+    const pairId = pick(undercoverPairs.map((_, index) => index).filter(index => !used.includes(index)));
+    const [civil_word, spy_word] = undercoverPairs[pairId];
+    const shuffled = shuffle(online);
+    const spies = shuffled.slice(0, online.length >= 8 ? 2 : 1);
+    const whiteboard = u.whiteboard_on ? shuffled[spies.length] : null;
+    st.undercover = { phase: 'discuss', round: (u.round || 0) + 1, used: [...used, pairId],
+      players: online, alive: online, spies, spy_count: spies.length, civil_word, spy_word,
+      whiteboard_on: !!u.whiteboard_on, whiteboard };
+    return;
+  }
+  if (action === 'u_reset') {
+    if (!['discuss', 'vote'].includes(u.phase)) return 'phase';
+    if (me !== online[0]) return 'not_yours';
+    st.undercover = { phase: 'setup', round: u.round, used: u.used, whiteboard_on: u.whiteboard_on };
+    return;
+  }
+  if (!u.alive?.includes(me)) return 'not_in_round';
+  if (action === 'u_open_vote') {
+    if (u.phase !== 'discuss') return 'phase';
+    Object.assign(u, { phase: 'vote', ballot: (u.ballot || 0) + 1, votes: {}, targets: [...u.alive], runoff: false });
+    return;
+  }
+  if (action !== 'u_vote') return 'bad_action';
+  if (u.phase !== 'vote' || args.round !== u.round || args.ballot !== u.ballot) return 'phase';
+  if (args.player === me || !u.targets.includes(args.player)) return 'bad_target';
+  if (u.votes[me]) return 'already_voted';
+  u.votes[me] = args.player;
+  if (Object.keys(u.votes).length < u.alive.length) return;
+  const totals = Object.values(u.votes).reduce((counts, player) => inc(counts, player, 1), {});
+  const top = Math.max(...Object.values(totals));
+  const leaders = Object.keys(totals).filter(id => totals[id] === top);
+  if (leaders.length > 1 && !u.runoff) {
+    Object.assign(u, { ballot: u.ballot + 1, targets: leaders, votes: {}, runoff: true });
+    return;
+  }
+  delete u.votes; delete u.targets; delete u.runoff;
+  if (leaders.length > 1) {
+    Object.assign(u, { phase: 'discuss', last_tied: true, last_out: null });
+    return;
+  }
+  u.last_out = leaders[0];
+  u.last_tied = false;
+  u.alive = del(u.alive, u.last_out);
+  const spies = u.spies.filter(id => u.alive.includes(id)).length;
+  const civilians = u.alive.length - spies - Number(u.alive.includes(u.whiteboard));
+  u.winner = !spies ? 'civil' : spies >= civilians ? 'spy' : null;
+  u.phase = u.winner ? 'result' : 'discuss';
+}
+
 const roomPlayers = (db, room) => db.players.filter(p => p.room_id === room.id).sort((a, b) => a.seat - b.seat);
 const onlineIds = (db, room) => roomPlayers(db, room).filter(p => !p.left_at && Date.now() - p.last_seen < ONLINE_MS).map(p => p.id);
 function playerByToken(db, room, token) {
@@ -357,10 +443,11 @@ function playerByToken(db, room, token) {
 function mergeRoomNames(db, room) {
   const active = roomPlayers(db, room).filter(p => !p.alias_of);
   if (new Set(active.map(p => p.nickname)).size === active.length) return room.state;
-  const st = clone(room.state), { bluff: b, dice: d, king: k, truth: t } = st;
+  const st = clone(room.state), { bluff: b, dice: d, king: k, truth: t, undercover: u } = st;
   const reserved = new Set([
     ...(['recruit', 'roles', 'choose', 'think', 'speak', 'guess'].includes(b?.phase) ? b.players : []),
     ...(d?.phase === 'rolling' ? d.participants : []),
+    ...(['discuss', 'vote'].includes(u?.phase) ? u.players : []),
     ...(['command', 'challenge', 'handover'].includes(k?.phase) ? [k.king, ...Object.keys(k.numbers)] : []),
     ...(['choose', 'question'].includes(t?.phase) ? [...(t.askers || []), ...tDoers(t), t.q?.target] : [])
   ]);
@@ -418,6 +505,14 @@ function view(db, room, me) {
     st.bluff.roles = mine == null ? {} : { [me]: mine };
     // 老实人只在思考时间看得到答案
     if (st.bluff.q && (mine !== 'honest' || st.bluff.phase !== 'think')) { const q = { ...st.bluff.q }; delete q.answer; delete q.explain; st.bluff.q = q; }
+  }
+  const u = st.undercover;
+  if (u) {
+    u.blank = u.whiteboard === me;
+    u.word = u.players?.includes(me) && !u.blank ? (u.spies.includes(me) ? u.spy_word : u.civil_word) : null;
+    u.voted = Object.keys(u.votes || {});
+    delete u.votes; delete u.used;
+    if (u.phase !== 'result') { delete u.civil_word; delete u.spy_word; delete u.spies; delete u.whiteboard; }
   }
   delete st.used_q; delete st.game; delete st.proposal; delete st.bluff_next_q; delete st.bluff_next_honest;
   const roster = roomPlayers(db, room);
@@ -547,6 +642,7 @@ const mock = {
     // 这次操作属于哪个游戏；参与者 = 在线、而且在这个游戏页面的人
     const ag = ['ready', 'unready', 'roll', 'next_round', 'to_truth'].includes(action) ? 'dice'
       : action.startsWith('t_') ? 'truth' : action.startsWith('k_') ? 'king' : action.startsWith('b_') ? 'bluff'
+      : action.startsWith('u_') ? 'undercover'
       : action === 'propose' ? ((a.payload && a.payload.game) || st.where[me] || null)
       : action === 'pause' ? (st.where[me] || null) : null;
     const online = here(st, allOnline, ag);
@@ -575,6 +671,15 @@ const mock = {
           st.king = k;
         }
         if (g === 'bluff' && !st.bluff) st.bluff = bluffInit();
+        if (g === 'undercover') {
+          const u = st.undercover || { phase: 'setup' };
+          if (['discuss', 'vote'].includes(u.phase) && !u.players.includes(me)) {
+            u.players = add(u.players, me);
+            u.alive = add(u.alive, me);
+            if (u.phase === 'vote' && !u.runoff) u.targets = add(u.targets, me);
+          }
+          st.undercover = u;
+        }
       }
     }
     else if (action === 'propose') {
@@ -689,6 +794,10 @@ const mock = {
         if (t.mode !== 'dice') err = 'phase';
         else { st.game = 'dice'; st.dice = diceNewRound(st.dice || diceInit(), online); moveWhere(st, 'truth', 'dice'); }
       } else err = 'bad_action';
+    } else if (action.startsWith('u_')) {
+      if (!st.undercover || !online.includes(me)) err = 'no_game';
+      else if (paused) err = 'paused';
+      else err = undercoverAction(st, online, me, action, a);
     } else if (action.startsWith('b_')) {
       let b = st.bluff;
       const isSmart = b?.smart === me;
@@ -784,7 +893,7 @@ const mock = {
     if (!p || p.left_at) return { ok: true };
     p.left_at = Date.now();
     let st = clone(room.state);
-    if (st.where && st.where[p.id] !== 'bluff') { st.where = { ...st.where }; delete st.where[p.id]; }
+    if (st.where && !['bluff', 'undercover'].includes(st.where[p.id])) { st.where = { ...st.where }; delete st.where[p.id]; }
     if (st.dice) {
       st.dice.ready = del(st.dice.ready, p.id);
       if (st.dice.phase === 'rolling' && !st.dice.done.includes(p.id)) st.dice.participants = del(st.dice.participants, p.id);

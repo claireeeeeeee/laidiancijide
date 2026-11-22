@@ -21,12 +21,15 @@ const GAMES = [
   { id: 'truth', name: '真心话<br>大冒险', plain: '真心话大冒险', k: '题', hl: 'hl2' },
   { id: 'king', name: '国王游戏', k: '王', hl: 'hl3' },
   { id: 'bluff', name: '瞎掰王', k: '掰', hl: 'hl1' },
+  { id: 'undercover', name: '谁是卧底', k: '卧', hl: 'hl2' },
   { id: 'werewolf', name: '狼人杀', k: '狼', hl: 'hl2' },
   { id: 'forest', name: '森林进化论', k: '森', hl: 'hl3' }
 ];
 const gameName = id => (GAMES.find(g => g.id === id) || {}).plain || (GAMES.find(g => g.id === id) || {}).name || '';
 const SKINS = [['night', '深夜'], ['oc', '蜜橙'], ['sakura', '樱粉']];
 const ERR = {
+  undercover_people: '至少四位玩家进入谁是卧底才能开局',
+  already_voted: '这次投票已经提交',
   warnings_pending: '请先发出剩余的警告牌',
   bluff_waiting: '本轮暂停，等离开的玩家回来',
   bluff_settings_owner: '由当前负责设置的玩家操作',
@@ -670,13 +673,73 @@ function bluffHTML() {
   return '';
 }
 
+function undercoverHTML() {
+  const u = st().undercover || { phase: 'setup' };
+  const online = inGameIds('undercover'), my = me();
+  const hasEnough = online.length >= 4;
+  const whiteboardSetting = `<div class="timer-row"><span>白板</span>
+    <button class="chip ${u.whiteboard_on ? '' : 'on'}" data-act="u-whiteboard" data-v="0" aria-pressed="${!u.whiteboard_on}">关闭</button>
+    <button class="chip ${u.whiteboard_on ? 'on' : ''}" data-act="u-whiteboard" data-v="1" aria-pressed="${!!u.whiteboard_on}">1 位</button></div>`;
+  if (u.phase === 'setup') return `
+    <h1 class="h-title disp">谁是卧底</h1>
+    <details class="rules" open><summary class="rules-h">怎么玩</summary><div class="rules-b">
+      <p>4–7 人有 1 名卧底，8 人及以上有 2 名。每个人只看到自己的词，只有卧底拿到不同的词。</p>
+      <p>线下描述词语，不能直接说出原词。说完后投票，得票最高的人出局。平票重投一次，再平票就回到讨论。</p>
+      <p>找出所有卧底，平民获胜。场上卧底人数追平或超过平民时，卧底获胜。</p>
+      <p>开启白板后，一位玩家抽到空白词卡。白板与卧底同阵营，胜负判定只比较平民和卧底的人数。</p>
+    </div></details>
+    ${whiteboardSetting}
+    <p class="note">${online.length} 人已进入</p>
+    <div class="push stack"><button class="btn b1" data-act="u-start" ${hasEnough ? '' : 'disabled'}>开始发词</button></div>`;
+
+  const title = `<div class="h-cap">谁是卧底 · 第 ${u.round} 局</div>`;
+  if (u.phase === 'result') {
+    const rows = u.players.map(id => {
+      const role = id === u.whiteboard ? '白板' : u.spies.includes(id) ? '卧底' : '平民';
+      const tone = role === '白板' ? 'hl3' : role === '卧底' ? 'hl2' : 'hl1';
+      return `<div class="row"><span class="who">${esc(pname(id))}</span><span class="tag ${tone}">${role}</span></div>`;
+    }).join('');
+    return `${title}<h1 class="h-title disp">${u.winner === 'spy' ? '卧底获胜' : '平民获胜'}</h1>
+      <div class="qcard"><p>平民词 · ${esc(u.civil_word)}</p><p>卧底词 · ${esc(u.spy_word)}</p></div>
+      <div class="list">${rows}</div>
+      ${whiteboardSetting}
+      <div class="push stack"><button class="btn b1" data-act="u-start" ${hasEnough ? '' : 'disabled'}>再来一局</button>
+      ${hasEnough ? '' : '<p class="note">至少四位玩家在场才能再开一局</p>'}</div>`;
+  }
+
+  const alive = u.alive.includes(my);
+  const away = u.alive.filter(id => !online.includes(id));
+  const canReset = away.length > 0 && online[0] === my;
+  const status = u.last_tied ? '再次平票，本次无人出局。' : u.last_out ? esc(pname(u.last_out)) + '已出局。' : '';
+  const privateCard = u.blank ? '<div class="qcard"><div class="h-cap">你的身份</div><p>白板</p><small>你本局没有词语。</small></div>'
+    : u.word ? `<div class="qcard"><div class="h-cap">你的词语</div><p>${esc(u.word)}</p></div>` : '';
+  const notice = `${status ? `<p class="note">${status}</p>` : ''}
+    ${away.length ? `<p class="note" role="status">有 ${away.length} 位在场玩家暂时离线，回来后可继续投票。</p>` : ''}`;
+  const recovery = canReset ? '<button class="link" data-act="u-reset">结束本局，回到设置</button>' : '';
+  if (u.phase === 'discuss') return `${title}<h1 class="h-title disp">线下描述</h1>
+    ${privateCard}${notice}
+    <div class="push stack">${alive ? '<button class="btn b1" data-act="u-open-vote">描述结束，开始投票</button>'
+      : '<p class="note">你已出局，可以留在房间看结果。</p>'}${recovery}</div>`;
+
+  const voted = u.voted.includes(my);
+  const targets = u.targets.filter(id => id !== my);
+  const choices = alive && !voted ? targets.map(id => `<button class="cand ${S.uChoice === id ? 'on' : ''}"
+    data-act="u-target" data-pid="${esc(id)}" aria-pressed="${S.uChoice === id}">${esc(pname(id))}</button>`).join('') : '';
+  return `${title}<h1 class="h-title disp">${u.runoff ? '平票重投' : '投票'}</h1>${privateCard}${notice}
+    <p class="note">${u.voted.length}/${u.alive.length} 人已投票</p>
+    ${choices ? `<div class="cands">${choices}</div>` : ''}
+    <div class="push stack">${!alive ? '<p class="note">你已出局，等待投票结果。</p>' : voted ? '<p class="note">已投票，等待其他玩家。</p>'
+      : `<button class="btn b1" data-act="u-vote" ${targets.includes(S.uChoice) ? '' : 'disabled'}>确认投票</button>`}${recovery}</div>`;
+}
+
 function roomHTML() {
   const s = st();
   const g = myGame(), inGame = !!g;
   const pausedHere = !!s.paused && s.paused_game === g && inGame;
-  const canPause = inGame && !pausedHere && !(g === 'bluff' && s.bluff?.phase === 'setup');
+  const canPause = inGame && !pausedHere && g !== 'undercover' && !(g === 'bluff' && s.bluff?.phase === 'setup');
   const away = g === 'bluff' && s.bluff?.away?.length;
-  const body = !inGame ? lobbyHTML() : g === 'dice' ? diceHTML() : g === 'truth' ? truthHTML() : g === 'king' ? kingHTML() : g === 'bluff' ? bluffHTML() : '';
+  const body = !inGame ? lobbyHTML() : g === 'dice' ? diceHTML() : g === 'truth' ? truthHTML() : g === 'king' ? kingHTML()
+    : g === 'bluff' ? bluffHTML() : g === 'undercover' ? undercoverHTML() : '';
   return `
   <div class="topbar">
     ${inGame ? '<button class="icon-btn" data-act="back-lobby">‹ 大厅</button>' : `<span class="st" style="font-size:13px;color:var(--muted)">${players().filter(p => p.online).length} 人在线</span>`}
@@ -780,6 +843,9 @@ function setData(d) {
   const sig = JSON.stringify([d.version, d.players, d.state]);
   const first = !S.data;
   const cue = roomSound(S.data, d);
+  const previousVote = S.data?.state.undercover;
+  const nextVote = d.state.undercover;
+  if (previousVote?.round !== nextVote?.round || previousVote?.ballot !== nextVote?.ballot) S.uChoice = null;
   S.data = d;
   const bluff = d.state.bluff;
   const night = myGame() === 'bluff' && bluff?.smart === d.me &&
@@ -1126,6 +1192,16 @@ async function handle(a, ds = {}, el) {
       case 'k-skip': await act('propose', { kind: 'king_skip', payload: { key: st().king.key } }); break;
       case 'k-redeal': await act('propose', { kind: 'king_redeal', payload: { key: st().king.key } }); break;
       case 'k-restart': await act('propose', { kind: 'restart_round' }); break;
+      case 'u-start': await act('u_start'); break;
+      case 'u-whiteboard': await act('u_setup', { whiteboard: ds.v === '1' }); break;
+      case 'u-open-vote': await act('u_open_vote'); break;
+      case 'u-target': S.uChoice = ds.pid; S.sig = ''; render(); break;
+      case 'u-vote': {
+        const u = st().undercover;
+        if (S.uChoice && u) await act('u_vote', { player: S.uChoice, round: u.round, ballot: u.ballot });
+        break;
+      }
+      case 'u-reset': if (window.confirm('结束本局并回到设置？')) await act('u_reset'); break;
       case 'b-bank': await act('b_setup', { bank: ds.v }); break;
       case 'b-warnon': await act('b_setup', { warn_on: ds.v === '1' }); break;
       case 'b-rounds': await act('b_setup', { rounds: +ds.v }); break;
