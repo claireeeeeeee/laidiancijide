@@ -692,7 +692,8 @@ $$;
 create or replace function public._ldc_undercover_action(u jsonb, online jsonb, me text, action text, args jsonb) returns jsonb
 language plpgsql volatile as $$
 declare
-  pair jsonb; used jsonb; shuffled jsonb; spies jsonb; alive jsonb;
+  pair jsonb; used jsonb; spies jsonb; alive jsonb;
+  candidates jsonb; alternatives jsonb; spy text;
   votes jsonb; leaders jsonb; picked text; spy_count int; civil_count int; winner text;
   whiteboard text; whiteboard_on boolean := coalesce((u->>'whiteboard_on')::boolean,false);
   ballot int := coalesce((u->>'ballot')::int, 0);
@@ -709,10 +710,16 @@ begin
     used := coalesce(u->'used', '[]'::jsonb);
     pair := public._ldc_undercover_pair(used);
     if used ? (pair->>0) then used := '[]'::jsonb; end if;
-    shuffled := public._ldc_shuffle(online);
-    spies := jsonb_build_array(shuffled->0);
-    if jsonb_array_length(online) >= 8 then spies := spies || jsonb_build_array(shuffled->1); end if;
-    if whiteboard_on then whiteboard := shuffled->>jsonb_array_length(spies); end if;
+    candidates := online;
+    spies := '[]'::jsonb;
+    -- 上局卧底占一份签，其余候选人各占四份，已抽中的玩家不再参与本局抽签。
+    for i in 1..(case when jsonb_array_length(online) >= 8 then 2 else 1 end) loop
+      alternatives := public._ldc_minus(candidates,u->'spies');
+      spy := public._ldc_pick(candidates || alternatives || alternatives || alternatives);
+      spies := spies || jsonb_build_array(spy);
+      candidates := public._ldc_del(candidates,spy);
+    end loop;
+    if whiteboard_on then whiteboard := public._ldc_pick(candidates); end if;
     return jsonb_build_object('state', jsonb_build_object('phase','discuss','players',online,'alive',online,
       'spies',spies,'spy_count',jsonb_array_length(spies),'round',coalesce((u->>'round')::int,0)+1,
       'whiteboard_on',whiteboard_on,'whiteboard',whiteboard,
@@ -723,7 +730,7 @@ begin
     if u->>'phase' not in ('discuss','vote') then return '{"error":"phase"}'; end if;
     if me is distinct from online->>0 then return '{"error":"not_yours"}'; end if;
     return jsonb_build_object('state', jsonb_build_object('phase','setup','round',u->'round','used',u->'used',
-      'whiteboard_on',whiteboard_on));
+      'whiteboard_on',whiteboard_on,'spies',u->'spies'));
   end if;
 
   alive := u->'alive';
@@ -770,9 +777,159 @@ begin
 end $$;
 revoke all on function public._ldc_undercover_pair(jsonb), public._ldc_undercover_action(jsonb,jsonb,text,text,jsonb) from public, anon, authenticated;
 
+-- 狼人杀：固定七人局。夜间只向有权行动的人公开目标与查验结果。
+create or replace function public._ldc_werewolf_finish(w jsonb, next_phase text, shooter text default null) returns jsonb
+language plpgsql immutable as $$
+declare wolves int; villagers int; gods int; winner text;
+begin
+  if shooter is not null and jsonb_array_length(w->'alive') > 0 then
+    return w || jsonb_build_object('phase','shot','shooter',shooter,'after_shot',next_phase);
+  end if;
+  select count(*) filter (where value in ('wolf','king')),
+         count(*) filter (where value='villager'),
+         count(*) filter (where value in ('seer','witch','hunter','guard'))
+    into wolves,villagers,gods from jsonb_each_text(w->'roles') where w->'alive' ? key;
+  winner := case when wolves=0 then 'good' when villagers=0 or gods=0 then 'wolves' end;
+  w := w - 'shooter' - 'after_shot';
+  if winner is not null then return w || jsonb_build_object('phase','result','winner',winner); end if;
+  if next_phase='guard' then
+    return w || jsonb_build_object('phase',case when exists(
+      select 1 from jsonb_each_text(w->'roles') where value='guard' and w->'alive' ? key
+    ) then 'guard' else 'wolves' end,'night_no',(w->>'night_no')::int+1,'night','{}'::jsonb,'wolf_votes','{}'::jsonb);
+  end if;
+  return w || jsonb_build_object('phase',next_phase);
+end $$;
+
+create or replace function public._ldc_werewolf_action(w jsonb, online jsonb, me text, action text, a jsonb) returns jsonb
+language plpgsql volatile as $$
+declare
+  ph text := w->>'phase'; role text := w->'roles'->>me; pick text := a->>'player';
+  alive jsonb := w->'alive'; roles jsonb := w->'roles'; night jsonb := w->'night';
+  votes jsonb; leaders jsonb; wolf_ids jsonb; dead jsonb := '[]'::jsonb;
+  next_step text; bite text; poison text; shooter text; mode text := a->>'mode';
+  ballot int := coalesce((w->>'ballot')::int,0);
+begin
+  if action='w_start' then
+    if ph not in ('setup','result') then return '{"error":"phase"}'; end if;
+    if jsonb_array_length(online) <> 7 then return '{"error":"werewolf_people"}'; end if;
+    select jsonb_object_agg(id, (array['villager','wolf','king','seer','witch','hunter','guard'])[slot::int])
+      into roles from jsonb_array_elements_text(public._ldc_shuffle(online)) with ordinality as p(id,slot);
+    return jsonb_build_object('state',jsonb_build_object('phase','guard','game_no',coalesce((w->>'game_no')::int,0)+1,
+      'night_no',1,'players',online,'alive',online,'roles',roles,'night','{}'::jsonb,'wolf_votes','{}'::jsonb,
+      'antidote',true,'poison_available',true,'checks','[]'::jsonb,'last_dead','[]'::jsonb));
+  end if;
+  if action='w_reset' then
+    if ph in ('setup','result') then return '{"error":"phase"}'; end if;
+    if me is distinct from online->>0 then return '{"error":"not_yours"}'; end if;
+    return jsonb_build_object('state',jsonb_build_object('phase','setup','game_no',w->'game_no'));
+  end if;
+  if a->>'game' is distinct from w->>'game_no' then return '{"error":"phase"}'; end if;
+  if action='w_shoot' then
+    if ph <> 'shot' or a->>'night' is distinct from w->>'night_no' then return '{"error":"phase"}'; end if;
+    if me is distinct from w->>'shooter' then return '{"error":"not_yours"}'; end if;
+    if pick is not null and not (alive ? pick) then return '{"error":"bad_target"}'; end if;
+    if pick is not null then
+      w := w || jsonb_build_object('alive',public._ldc_del(alive,pick),'last_dead',(w->'last_dead') || jsonb_build_array(pick));
+    end if;
+    return jsonb_build_object('state',public._ldc_werewolf_finish(w,w->>'after_shot'));
+  end if;
+  if not coalesce(alive ? me,false) then return '{"error":"not_in_round"}'; end if;
+  if action='w_open_vote' then
+    if ph <> 'day' or a->>'night' is distinct from w->>'night_no' then return '{"error":"phase"}'; end if;
+    return jsonb_build_object('state',w || jsonb_build_object('phase','vote','votes','{}'::jsonb,
+      'targets',alive,'ballot',ballot+1,'runoff',false));
+  end if;
+  if action='w_vote' then
+    if ph <> 'vote' or a->>'ballot' is distinct from w->>'ballot' then return '{"error":"phase"}'; end if;
+    if pick is null or pick=me or not (w->'targets' ? pick) then return '{"error":"bad_target"}'; end if;
+    votes := w->'votes';
+    if votes ? me then return '{"error":"already_voted"}'; end if;
+    votes := votes || jsonb_build_object(me,pick);
+    w := jsonb_set(w,'{votes}',votes);
+    if (select count(*) from jsonb_object_keys(votes)) < jsonb_array_length(alive) then return jsonb_build_object('state',w); end if;
+    with totals as (select value, count(*) as tally from jsonb_each_text(votes) group by value)
+    select jsonb_agg(value order by value) into leaders from totals where tally=(select max(tally) from totals);
+    if jsonb_array_length(leaders)>1 and not (w->>'runoff')::boolean then
+      return jsonb_build_object('state',w || jsonb_build_object('ballot',ballot+1,'targets',leaders,'votes','{}'::jsonb,'runoff',true));
+    end if;
+    w := w - 'votes' - 'targets' - 'runoff';
+    if jsonb_array_length(leaders)>1 then
+      return jsonb_build_object('state',public._ldc_werewolf_finish(w || '{"last_dead":[],"last_event":"tie"}'::jsonb,'guard'));
+    end if;
+    pick := leaders->>0;
+    shooter := case when roles->>pick in ('hunter','king') then pick end;
+    w := w || jsonb_build_object('alive',public._ldc_del(alive,pick),'last_dead',leaders,'last_event','exile');
+    return jsonb_build_object('state',public._ldc_werewolf_finish(w,'guard',shooter));
+  end if;
+  if action <> 'w_night' then return '{"error":"bad_action"}'; end if;
+  if a->>'night' is distinct from w->>'night_no' or a->>'step' is distinct from ph
+     or ph not in ('guard','wolves','seer','witch') then return '{"error":"phase"}'; end if;
+  if (ph='wolves' and role not in ('wolf','king')) or (ph<>'wolves' and role is distinct from ph) then
+    return '{"error":"not_yours"}';
+  end if;
+  if pick is not null and not (alive ? pick) then return '{"error":"bad_target"}'; end if;
+
+  if ph='guard' then
+    if pick is not null and pick=w->>'last_guard' then return '{"error":"werewolf_guard_repeat"}'; end if;
+    night := night || jsonb_build_object('guarded',pick);
+    w := w || jsonb_build_object('last_guard',pick);
+  elsif ph='wolves' then
+    if pick is not null and roles->>pick in ('wolf','king') then return '{"error":"bad_target"}'; end if;
+    votes := (w->'wolf_votes') || jsonb_build_object(me,coalesce(pick,''));
+    w := jsonb_set(w,'{wolf_votes}',votes);
+    select coalesce(jsonb_agg(key),'[]'::jsonb) into wolf_ids from jsonb_each_text(roles)
+      where value in ('wolf','king') and alive ? key;
+    if not public._ldc_subset(wolf_ids,(select coalesce(jsonb_agg(key),'[]'::jsonb) from jsonb_object_keys(votes) p(key)))
+      or (select count(distinct value) from jsonb_each_text(votes)) <> 1 then
+      return jsonb_build_object('state',w);
+    end if;
+    night := night || jsonb_build_object('bite',pick);
+  elsif ph='seer' then
+    if pick=me then return '{"error":"bad_target"}'; end if;
+    if pick is not null then
+      w := jsonb_set(w,'{checks}',(w->'checks') || jsonb_build_array(jsonb_build_object('player',pick,'wolf',roles->>pick in ('wolf','king'))));
+    end if;
+  else
+    bite := night->>'bite';
+    if mode='save' then
+      if not (w->>'antidote')::boolean or bite is null
+        or (bite=me and (w->>'night_no')::int>1) then return '{"error":"werewolf_potion"}'; end if;
+      w := w || '{"antidote":false}'::jsonb;
+      night := night || '{"saved":true}'::jsonb;
+    elsif mode='poison' then
+      if not (w->>'poison_available')::boolean or pick is null or pick=me then return '{"error":"werewolf_potion"}'; end if;
+      w := w || '{"poison_available":false}'::jsonb;
+      night := night || jsonb_build_object('poisoned',pick);
+    elsif mode is distinct from 'pass' then return '{"error":"bad_action"}'; end if;
+  end if;
+  w := jsonb_set(w,'{night}',night);
+  for next_step in select step from unnest(array['wolves','seer','witch']) with ordinality as p(step,n)
+    where n > case ph when 'guard' then 0 when 'wolves' then 1 when 'seer' then 2 else 3 end order by n
+  loop
+    if next_step='wolves' or exists(select 1 from jsonb_each_text(roles) where value=next_step and alive ? key) then
+      return jsonb_build_object('state',w || jsonb_build_object('phase',next_step));
+    end if;
+  end loop;
+
+  bite := night->>'bite';
+  poison := night->>'poisoned';
+  if bite is not null then
+    if (bite is not distinct from night->>'guarded') = coalesce((night->>'saved')::boolean,false) then
+      dead := public._ldc_add(dead,bite);
+      if roles->>bite='hunter' and bite is distinct from poison then shooter := bite; end if;
+    end if;
+  end if;
+  if poison is not null then dead := public._ldc_add(dead,poison); end if;
+  w := w || jsonb_build_object('alive',public._ldc_minus(alive,dead),'last_dead',dead,'last_event','dawn');
+  return jsonb_build_object('state',public._ldc_werewolf_finish(w,'day',shooter));
+end $$;
+
+revoke all on function public._ldc_werewolf_finish(jsonb,text,text), public._ldc_werewolf_action(jsonb,jsonb,text,text,jsonb)
+  from public, anon, authenticated;
+
 create or replace function public._ldc_view(p_room uuid, p_me uuid) returns jsonb
 language plpgsql stable as $$
-declare r public.ldc_rooms; st jsonb; mine jsonb; u jsonb; word text; blank boolean;
+declare r public.ldc_rooms; st jsonb; mine jsonb; u jsonb; word text; blank boolean; w jsonb; role text; game_view jsonb;
 begin
   select * into r from public.ldc_rooms where id = p_room;
   st := r.state;
@@ -813,6 +970,34 @@ begin
     if u->>'phase' <> 'result' then u := u - 'civil_word' - 'spy_word' - 'spies' - 'whiteboard'; end if;
     st := jsonb_set(st,'{undercover}',u);
   end if;
+  w := st->'werewolf';
+  if w is not null then
+    role := w->'roles'->>p_me::text;
+    game_view := w - 'roles' - 'night' - 'wolf_votes' - 'votes' - 'checks' - 'last_guard'
+      - 'antidote' - 'poison_available' - 'after_shot';
+    game_view := game_view || jsonb_build_object('role',role,'voted',
+      coalesce((select jsonb_agg(id) from jsonb_object_keys(w->'votes') p(id)),'[]'::jsonb));
+    if w->>'phase'='result' then game_view := game_view || jsonb_build_object('roles',w->'roles'); end if;
+    if w->>'phase' in ('guard','wolves','seer','witch') then
+      game_view := game_view || '{"phase":"night"}'::jsonb;
+      if (w->'alive') ? p_me::text and (role=w->>'phase' or (w->>'phase'='wolves' and role in ('wolf','king'))) then
+        game_view := game_view || jsonb_build_object('step',w->>'phase');
+      end if;
+    end if;
+    if role in ('wolf','king') then
+      game_view := game_view || jsonb_build_object('team',
+        (select jsonb_agg(key) from jsonb_each_text(w->'roles') where value in ('wolf','king')));
+      if w->>'phase'='wolves' then game_view := game_view || jsonb_build_object('wolf_votes',w->'wolf_votes'); end if;
+    elsif role='seer' then
+      game_view := game_view || jsonb_build_object('checks',w->'checks');
+    elsif role='guard' then
+      game_view := game_view || jsonb_build_object('last_guard',w->'last_guard');
+    elsif role='witch' and w->>'phase'='witch' and (w->'alive') ? p_me::text then
+      game_view := game_view || jsonb_build_object('antidote',w->'antidote','poison_available',w->'poison_available',
+        'bite',case when (w->>'antidote')::boolean then w->'night'->>'bite' end);
+    end if;
+    st := jsonb_set(st,'{werewolf}',game_view);
+  end if;
   st := st - 'used_q' - 'game' - 'proposal' - 'bluff_next_q' - 'bluff_next_honest';
   return jsonb_build_object(
     'ok', true, 'code', r.code, 'me', p_me::text, 'version', r.version, 'now', public._ldc_now_ms(),
@@ -830,7 +1015,7 @@ create or replace function public._ldc_merge_names(p_room uuid, st jsonb) return
 language plpgsql volatile as $$
 declare
   reserved jsonb := '[]'::jsonb;
-  b jsonb := st->'bluff'; k jsonb := st->'king'; t jsonb := st->'truth'; d jsonb := st->'dice'; u jsonb := st->'undercover';
+  b jsonb := st->'bluff'; k jsonb := st->'king'; t jsonb := st->'truth'; d jsonb := st->'dice'; u jsonb := st->'undercover'; w jsonb := st->'werewolf';
   duplicate record; item record; stats jsonb; scores jsonb;
 begin
   if not exists (select 1 from public.ldc_players where room_id = p_room and alias_of is null
@@ -838,6 +1023,7 @@ begin
   if b->>'phase' in ('recruit','roles','choose','think','speak','guess') then reserved := reserved || b->'players'; end if;
   if d->>'phase' = 'rolling' then reserved := reserved || d->'participants'; end if;
   if u->>'phase' in ('discuss','vote') then reserved := reserved || u->'players'; end if;
+  if w->>'phase' not in ('setup','result') then reserved := reserved || w->'players'; end if;
   if k->>'phase' in ('command','challenge','handover') then
     reserved := reserved || jsonb_build_array(k->>'king') ||
       (select coalesce(jsonb_agg(id), '[]'::jsonb) from jsonb_object_keys(k->'numbers') as p(id));
@@ -993,7 +1179,7 @@ declare
   r ldc_rooms; v_pid uuid; me text; online jsonb; st jsonb; st0 jsonb; d jsonb;
   err text; res jsonb := '{}'::jsonb; p jsonb; k text; g text; t text; v int; now_ms bigint := _ldc_now_ms();
   a jsonb := coalesce(p_args, '{}'::jsonb); tr jsonb; paused boolean; king_result jsonb; bl jsonb;
-  all_online jsonb; ag text; kg jsonb; u jsonb; undercover_result jsonb;
+  all_online jsonb; ag text; kg jsonb; u jsonb; undercover_result jsonb; w jsonb; werewolf_result jsonb;
 begin
   select * into r from ldc_rooms where code = p_code for update;
   if not found then return '{"ok":false,"error":"not_found"}'; end if;
@@ -1022,6 +1208,7 @@ begin
   ag := case when p_action in ('ready', 'unready', 'roll', 'next_round', 'to_truth') then 'dice'
              when left(p_action, 2) = 't_' then 'truth' when left(p_action, 2) = 'k_' then 'king' when left(p_action, 2) = 'b_' then 'bluff'
              when left(p_action, 2) = 'u_' then 'undercover'
+             when left(p_action, 2) = 'w_' then 'werewolf'
              when p_action = 'propose' then coalesce(a->'payload'->>'game', st->'where'->>me)
              when p_action = 'pause' then st->'where'->>me end;
   online := _ldc_here(st, all_online, ag);
@@ -1034,7 +1221,9 @@ begin
   -- 进入某个游戏页面（g = null 回大厅）。不用别人同意
   elsif p_action = 'goto' then
     g := a->>'game';
-    if g is not null and g not in ('dice', 'truth', 'king', 'bluff', 'undercover') then err := 'not_ready';
+    w := st->'werewolf';
+    if g is not null and g not in ('dice', 'truth', 'king', 'bluff', 'undercover','werewolf') then err := 'not_ready';
+    elsif g='werewolf' and w->>'phase' not in ('setup','result') and not (w->'players' ? me) then err := 'werewolf_in_progress';
     else
       st := jsonb_set(st, '{where}', (st->'where') || jsonb_build_object(me, g));
       if g = 'dice' then
@@ -1057,6 +1246,7 @@ begin
         end if;
       end if;
       if g = 'bluff' and st->'bluff' is null then st := jsonb_set(st, '{bluff}', _ldc_bluff_init()); end if;
+      if g='werewolf' and w is null then st := jsonb_set(st,'{werewolf}','{"phase":"setup"}'::jsonb); end if;
       if g = 'undercover' then
         u := coalesce(st->'undercover','{"phase":"setup"}'::jsonb);
         if u->>'phase' in ('discuss','vote') and not (u->'players' ? me) then
@@ -1246,6 +1436,14 @@ begin
     end if;
     if err is null and st->>'game' = 'truth' then st := jsonb_set(st, '{truth}', tr); end if;
 
+  elsif left(p_action, 2) = 'w_' then
+    if st->'werewolf' is null or not (online ? me) then err := 'no_game';
+    elsif paused then err := 'paused';
+    else
+      werewolf_result := _ldc_werewolf_action(st->'werewolf',online,me,p_action,a);
+      err := werewolf_result->>'error';
+      if err is null then st := jsonb_set(st,'{werewolf}',werewolf_result->'state'); end if;
+    end if;
   elsif left(p_action, 2) = 'u_' then
     if st->'undercover' is null or not (online ? me) then err := 'no_game';
     elsif paused then err := 'paused';
@@ -1421,7 +1619,7 @@ begin
   if v_pid is null then return '{"ok":true}'; end if;
   -- 摇骰时离开且还没摇：从本轮移除，避免卡住其他人
   st := r.state; d := st->'dice';
-  if coalesce(st->'where'->>v_pid::text,'') not in ('bluff','undercover') then
+  if coalesce(st->'where'->>v_pid::text,'') not in ('bluff','undercover','werewolf') then
     st := jsonb_set(st, '{where}', coalesce(st->'where', '{}'::jsonb) - v_pid::text);
   end if;
   if d is not null then

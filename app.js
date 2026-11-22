@@ -28,6 +28,10 @@ const GAMES = [
 const gameName = id => (GAMES.find(g => g.id === id) || {}).plain || (GAMES.find(g => g.id === id) || {}).name || '';
 const SKINS = [['night', '深夜'], ['oc', '蜜橙'], ['sakura', '樱粉']];
 const ERR = {
+  werewolf_people: '正好七位玩家在场才能开局',
+  werewolf_in_progress: '这一局已经发牌，下一局可以参加',
+  werewolf_guard_repeat: '不能连续两晚守护同一位玩家',
+  werewolf_potion: '现在不能使用这瓶药',
   undercover_people: '至少四位玩家进入谁是卧底才能开局',
   already_voted: '这次投票已经提交',
   warnings_pending: '请先发出剩余的警告牌',
@@ -732,14 +736,101 @@ function undercoverHTML() {
       : `<button class="btn b1" data-act="u-vote" ${targets.includes(S.uChoice) ? '' : 'disabled'}>确认投票</button>`}${recovery}</div>`;
 }
 
+const WEREWOLF_ROLES = {
+  villager: ['平民', '好人', '白天参与讨论和投票。'],
+  wolf: ['狼人', '狼人', '夜里和狼王共同选择袭击目标。'],
+  king: ['狼王', '狼人', '参与夜袭。白天被投票放逐时，可以带走一人。'],
+  seer: ['预言家', '好人', '每晚可查验一名其他玩家的阵营。'],
+  witch: ['女巫', '好人', '解药和毒药各一瓶，每晚最多用一瓶。仅首夜可以用解药救自己。'],
+  hunter: ['猎人', '好人', '被狼袭击或投票放逐出局时，可以开枪带走一人。被毒或被开枪带走时不能开枪。'],
+  guard: ['守卫', '好人', '每晚可守护一人，可以守自己。不能连续两晚守同一人。']
+};
+function werewolfRules() {
+  const rows = Object.values(WEREWOLF_ROLES).map(([name, camp, skill]) =>
+    `<tr><th scope="row">${name}</th><td>${camp}</td><td>${skill}</td></tr>`).join('');
+  return `<details class="rules" open><summary class="rules-h">怎么玩 · 7 人屠边局</summary><div class="rules-b">
+    <p>每个身份各 1 人，共 5 名好人和 2 名狼人。</p>
+    <table class="bluff-points"><thead><tr><th>身份</th><th>阵营</th><th>能力</th></tr></thead><tbody>${rows}</tbody></table>
+    <p><strong>夜间</strong>：守卫 → 狼队 → 预言家 → 女巫。两狼需选同一目标才会落刀。守护抵消狼刀，无法挡毒。同一人当晚既被守又被解药救，仍会出局。</p>
+    <p><strong>白天</strong>：公布出局名单，身份暂不公开。线下讨论，网页投票。平票只在最高票玩家中重投一次，再平票则无人出局并进入下一夜。</p>
+    <p><strong>屠边</strong>：两狼全部出局，好人获胜。狼队仍有人存活时，唯一的平民出局，或四位神职全部出局，狼人获胜。先结算开枪或带人，再判断胜负。</p>
+  </div></details>`;
+}
+
+function werewolfHTML() {
+  const w = st().werewolf || { phase: 'setup' }, my = me();
+  const online = inGameIds('werewolf'), enough = online.length === 7;
+  if (w.phase === 'setup') return `
+    <h1 class="h-title disp">狼人杀 · 7 人</h1>${werewolfRules()}
+    <p class="note">当前 ${online.length} / 7 人</p>
+    <div class="push stack"><button class="btn b1" data-act="w-start" ${enough ? '' : 'disabled'}>开始发身份</button></div>`;
+
+  const role = WEREWOLF_ROLES[w.role];
+  const alive = w.alive.includes(my);
+  const away = w.alive.filter(id => !online.includes(id));
+  const own = role ? `<div class="qcard"><div class="h-cap">你的身份 · ${role[1]}阵营</div><p>${role[0]}</p><small>${role[2]}</small></div>` : '';
+  const dead = w.last_dead || [];
+  const update = w.last_event === 'tie' ? '再次平票，无人出局。' : dead.length ? esc(names(dead)) + '出局。'
+    : w.last_event === 'dawn' ? '昨夜无人出局。' : '';
+  const head = `<div class="h-cap">狼人杀 · 第 ${w.game_no} 局</div>`;
+  if (w.phase === 'result') return `${head}<h1 class="h-title disp">${w.winner === 'good' ? '好人获胜' : '狼人获胜'}</h1>
+    ${update ? `<p class="note">${update}</p>` : ''}
+    <div class="list">${w.players.map(id => `<div class="row"><span class="who">${esc(pname(id))}</span>
+      <span class="tag">${WEREWOLF_ROLES[w.roles[id]][0]}</span></div>`).join('')}</div>
+    <div class="push stack"><button class="btn b1" data-act="w-start" ${enough ? '' : 'disabled'}>再来一局</button>
+    ${enough ? '' : '<p class="note">需要正好 7 人才能开局。</p>'}</div>`;
+
+  const targets = (ids, action, mode = '') => `<div class="cands">${ids.map(id =>
+    `<button class="cand" data-act="${action}" data-pid="${esc(id)}" data-mode="${mode}">${esc(pname(id))}${id === my ? '（我）' : ''}</button>`).join('')}</div>`;
+  const pass = (action, text = '跳过') => `<button class="link" data-act="${action}" data-mode="pass">${text}</button>`;
+  const awayShooter = w.phase === 'shot' && !online.includes(w.shooter);
+  const status = `${update ? `<p class="note">${update}</p>` : ''}${away.length || awayShooter ?
+    '<p class="note" role="status">有玩家暂时离线，回来后可继续。</p>' : ''}`;
+  const reset = (away.length || awayShooter) && online[0] === my ? '<button class="link" data-act="w-reset">结束本局</button>' : '';
+  let title = '', body = '';
+  if (w.phase === 'night') {
+    title = `第 ${w.night_no} 夜`;
+    if (w.step === 'guard') body = `<p class="tip">选择今晚守护的人</p>${targets(w.alive.filter(id => id !== w.last_guard), 'w-night')}${pass('w-night')}`;
+    else if (w.step === 'wolves') {
+      const agreed = w.wolf_votes || {};
+      body = `<p class="tip">狼队选择袭击对象。两人选择一致时确认。</p>
+        ${targets(w.alive.filter(id => !w.team.includes(id)), 'w-night')}${pass('w-night','今晚不袭击')}
+        <p class="note">${w.team.filter(id => w.alive.includes(id)).map(id => `${esc(pname(id))}：${id in agreed ? agreed[id] ? esc(pname(agreed[id])) : '不袭击' : '未选'}`).join(' · ')}</p>`;
+    } else if (w.step === 'seer') body = `<p class="tip">选一名其他玩家查验</p>${targets(w.alive.filter(id => id !== my),'w-night')}${pass('w-night')}`;
+    else if (w.step === 'witch') {
+      const save = w.antidote && w.bite && (w.bite !== my || w.night_no === 1);
+      body = `<p class="tip">${w.antidote ? w.bite ? `今夜被袭击的是 ${esc(pname(w.bite))}` : '今夜无人被袭击' : '解药已用完'}</p>
+        ${save ? '<button class="btn b1" data-act="w-night" data-mode="save">使用解药</button>' : ''}
+        ${w.poison_available ? `<details class="rules"><summary class="rules-h">使用毒药</summary>
+        ${targets(w.alive.filter(id => id !== my),'w-night','poison')}</details>` : ''}
+        ${pass('w-night','今晚不用药')}`;
+    } else body = `<p class="note">${alive ? '等待夜间行动结束。' : '你已出局，可以继续查看进度。'}</p>`;
+  } else if (w.phase === 'day') {
+    title = `第 ${w.night_no} 天讨论`;
+    body = alive ? '<button class="btn b1" data-act="w-open-vote">讨论结束，开始投票</button>' : '<p class="note">你已出局。</p>';
+  } else if (w.phase === 'vote') {
+    title = w.runoff ? '平票重投' : '放逐投票';
+    body = `<p class="note">${w.voted.length} / ${w.alive.length} 人已投票</p>${!alive ? '<p class="note">你已出局。</p>' :
+      w.voted.includes(my) ? '<p class="note">已投票，等待其他玩家。</p>' : targets(w.targets.filter(id => id !== my),'w-vote')}`;
+  } else if (w.phase === 'shot') {
+    title = '出局技能';
+    body = w.shooter === my ? `<p class="tip">选择一名玩家带走</p>${targets(w.alive,'w-shoot')}${pass('w-shoot','放弃发动')}`
+      : '<p class="note">等待出局玩家处理技能。</p>';
+  }
+  const checked = w.checks?.length ? `<div class="list">${w.checks.map(q => `<div class="row"><span class="who">${esc(pname(q.player))}</span><span>${q.wolf ? '狼人' : '好人'}</span></div>`).join('')}</div>` : '';
+  return `${head}<h1 class="h-title disp">${title}</h1>${own}${status}${checked}
+    ${w.team ? `<p class="note">狼队 · ${esc(names(w.team))}</p>` : ''}
+    <div class="push stack">${body}${reset}</div>`;
+}
+
 function roomHTML() {
   const s = st();
   const g = myGame(), inGame = !!g;
   const pausedHere = !!s.paused && s.paused_game === g && inGame;
-  const canPause = inGame && !pausedHere && g !== 'undercover' && !(g === 'bluff' && s.bluff?.phase === 'setup');
+  const canPause = inGame && !pausedHere && !['undercover','werewolf'].includes(g) && !(g === 'bluff' && s.bluff?.phase === 'setup');
   const away = g === 'bluff' && s.bluff?.away?.length;
   const body = !inGame ? lobbyHTML() : g === 'dice' ? diceHTML() : g === 'truth' ? truthHTML() : g === 'king' ? kingHTML()
-    : g === 'bluff' ? bluffHTML() : g === 'undercover' ? undercoverHTML() : '';
+    : g === 'bluff' ? bluffHTML() : g === 'undercover' ? undercoverHTML() : g === 'werewolf' ? werewolfHTML() : '';
   return `
   <div class="topbar">
     ${inGame ? '<button class="icon-btn" data-act="back-lobby">‹ 大厅</button>' : `<span class="st" style="font-size:13px;color:var(--muted)">${players().filter(p => p.online).length} 人在线</span>`}
@@ -1192,6 +1283,14 @@ async function handle(a, ds = {}, el) {
       case 'k-skip': await act('propose', { kind: 'king_skip', payload: { key: st().king.key } }); break;
       case 'k-redeal': await act('propose', { kind: 'king_redeal', payload: { key: st().king.key } }); break;
       case 'k-restart': await act('propose', { kind: 'restart_round' }); break;
+      case 'w-start': await act('w_start'); break;
+      case 'w-reset': if (window.confirm('结束本局并返回设置？')) await act('w_reset'); break;
+      case 'w-open-vote': case 'w-night': case 'w-vote': case 'w-shoot': {
+        const w = st().werewolf;
+        if (w) await act(a.replaceAll('-', '_'), { game: w.game_no, night: w.night_no, step: w.step,
+          ballot: w.ballot, player: ds.pid, mode: ds.mode });
+        break;
+      }
       case 'u-start': await act('u_start'); break;
       case 'u-whiteboard': await act('u_setup', { whiteboard: ds.v === '1' }); break;
       case 'u-open-vote': await act('u_open_vote'); break;

@@ -7,7 +7,7 @@ const params = new URLSearchParams(location.search);
 const MOCK = params.has('mock') || !cfg.supabaseUrl || !cfg.supabaseAnonKey;
 const ONLINE_MS = 20000;
 const VOTE_MS = 20000;
-const GAMES_READY = ['dice', 'truth', 'king', 'bluff', 'undercover'];
+const GAMES_READY = ['dice', 'truth', 'king', 'bluff', 'undercover', 'werewolf'];
 
 // ---------- 正式版 ----------
 async function rpc(fn, args) {
@@ -387,9 +387,16 @@ function undercoverAction(st, online, me, action, args) {
     const used = u.used?.length < undercoverPairs.length ? u.used : [];
     const pairId = pick(undercoverPairs.map((_, index) => index).filter(index => !used.includes(index)));
     const [civil_word, spy_word] = undercoverPairs[pairId];
-    const shuffled = shuffle(online);
-    const spies = shuffled.slice(0, online.length >= 8 ? 2 : 1);
-    const whiteboard = u.whiteboard_on ? shuffled[spies.length] : null;
+    let candidates = online.slice();
+    const spies = [];
+    const count = online.length >= 8 ? 2 : 1;
+    for (let i = 0; i < count; i++) {
+      const alternatives = candidates.filter(id => !(u.spies || []).includes(id));
+      const spy = pick(candidates.concat(alternatives, alternatives, alternatives));
+      spies.push(spy);
+      candidates = del(candidates, spy);
+    }
+    const whiteboard = u.whiteboard_on ? pick(candidates) : null;
     st.undercover = { phase: 'discuss', round: (u.round || 0) + 1, used: [...used, pairId],
       players: online, alive: online, spies, spy_count: spies.length, civil_word, spy_word,
       whiteboard_on: !!u.whiteboard_on, whiteboard };
@@ -398,7 +405,7 @@ function undercoverAction(st, online, me, action, args) {
   if (action === 'u_reset') {
     if (!['discuss', 'vote'].includes(u.phase)) return 'phase';
     if (me !== online[0]) return 'not_yours';
-    st.undercover = { phase: 'setup', round: u.round, used: u.used, whiteboard_on: u.whiteboard_on };
+    st.undercover = { phase: 'setup', round: u.round, used: u.used, whiteboard_on: u.whiteboard_on, spies: u.spies };
     return;
   }
   if (!u.alive?.includes(me)) return 'not_in_round';
@@ -434,6 +441,144 @@ function undercoverAction(st, online, me, action, args) {
   u.phase = u.winner ? 'result' : 'discuss';
 }
 
+const wolfRoles = ['villager', 'wolf', 'king', 'seer', 'witch', 'hunter', 'guard'];
+const isWolf = role => role === 'wolf' || role === 'king';
+const wolfNight = ['guard', 'wolves', 'seer', 'witch'];
+function finishWerewolf(w, next, shooter = null) {
+  if (shooter && w.alive.length) {
+    Object.assign(w, { phase: 'shot', shooter, after_shot: next });
+    return;
+  }
+  delete w.shooter; delete w.after_shot;
+  const living = w.alive.map(id => w.roles[id]);
+  const wolves = living.filter(isWolf).length;
+  if (!wolves || !living.includes('villager') || !living.some(role => ['seer', 'witch', 'hunter', 'guard'].includes(role))) {
+    Object.assign(w, { phase: 'result', winner: wolves ? 'wolves' : 'good' });
+  } else if (next === 'guard') {
+    Object.assign(w, { phase: living.includes('guard') ? 'guard' : 'wolves', night_no: w.night_no + 1, night: {}, wolf_votes: {} });
+  } else w.phase = next;
+}
+function werewolfAction(st, online, me, action, a) {
+  const w = st.werewolf, { phase, alive, roles, night } = w;
+  const target = a.player || null;
+  if (action === 'w_start') {
+    if (!['setup', 'result'].includes(phase)) return 'phase';
+    if (online.length !== 7) return 'werewolf_people';
+    const roles = Object.fromEntries(shuffle(online).map((id, i) => [id, wolfRoles[i]]));
+    st.werewolf = { phase: 'guard', game_no: (w.game_no || 0) + 1, night_no: 1, players: online, alive: online,
+      roles, night: {}, wolf_votes: {}, antidote: true, poison_available: true, checks: [], last_dead: [] };
+    return;
+  }
+  if (action === 'w_reset') {
+    if (['setup', 'result'].includes(phase)) return 'phase';
+    if (me !== online[0]) return 'not_yours';
+    st.werewolf = { phase: 'setup', game_no: w.game_no };
+    return;
+  }
+  if (a.game !== w.game_no) return 'phase';
+  if (action === 'w_shoot') {
+    if (phase !== 'shot' || a.night !== w.night_no) return 'phase';
+    if (w.shooter !== me) return 'not_yours';
+    if (target && !alive.includes(target)) return 'bad_target';
+    if (target) {
+      w.alive = del(alive, target);
+      w.last_dead = add(w.last_dead, target);
+    }
+    finishWerewolf(w, w.after_shot);
+    return;
+  }
+  if (!alive?.includes(me)) return 'not_in_round';
+  if (action === 'w_open_vote') {
+    if (phase !== 'day' || a.night !== w.night_no) return 'phase';
+    Object.assign(w, { phase: 'vote', votes: {}, targets: alive, ballot: (w.ballot || 0) + 1, runoff: false });
+    return;
+  }
+  if (action === 'w_vote') {
+    if (phase !== 'vote' || a.ballot !== w.ballot) return 'phase';
+    if (target === me || !w.targets.includes(target)) return 'bad_target';
+    if (w.votes[me]) return 'already_voted';
+    w.votes[me] = target;
+    if (Object.keys(w.votes).length < alive.length) return;
+    const totals = Object.values(w.votes).reduce((counts, id) => inc(counts, id, 1), {});
+    const top = Math.max(...Object.values(totals));
+    const leaders = Object.keys(totals).filter(id => totals[id] === top);
+    if (leaders.length > 1 && !w.runoff) {
+      Object.assign(w, { ballot: w.ballot + 1, targets: leaders, votes: {}, runoff: true });
+      return;
+    }
+    delete w.votes; delete w.targets; delete w.runoff;
+    if (leaders.length > 1) {
+      Object.assign(w, { last_dead: [], last_event: 'tie' });
+      finishWerewolf(w, 'guard');
+    } else {
+      const out = leaders[0];
+      Object.assign(w, { alive: del(alive, out), last_dead: leaders, last_event: 'exile' });
+      finishWerewolf(w, 'guard', ['hunter', 'king'].includes(roles[out]) ? out : null);
+    }
+    return;
+  }
+  if (action !== 'w_night') return 'bad_action';
+  if (a.night !== w.night_no || a.step !== phase || !wolfNight.includes(phase)) return 'phase';
+  if (phase === 'wolves' ? !isWolf(roles[me]) : roles[me] !== phase) return 'not_yours';
+  if (target && !alive.includes(target)) return 'bad_target';
+  if (phase === 'guard') {
+    if (target && target === w.last_guard) return 'werewolf_guard_repeat';
+    w.last_guard = night.guarded = target;
+  } else if (phase === 'wolves') {
+    if (target && isWolf(roles[target])) return 'bad_target';
+    w.wolf_votes[me] = target || '';
+    const wolves = alive.filter(id => isWolf(roles[id]));
+    if (!wolves.every(id => w.wolf_votes[id] === (target || ''))) return;
+    night.bite = target;
+  } else if (phase === 'seer') {
+    if (target === me) return 'bad_target';
+    if (target) w.checks.push({ player: target, wolf: isWolf(roles[target]) });
+  } else if (a.mode === 'save') {
+    if (!w.antidote || !night.bite || (night.bite === me && w.night_no > 1)) return 'werewolf_potion';
+    w.antidote = false;
+    night.saved = true;
+  } else if (a.mode === 'poison') {
+    if (!w.poison_available || !target || target === me) return 'werewolf_potion';
+    w.poison_available = false;
+    night.poisoned = target;
+  } else if (a.mode !== 'pass') return 'bad_action';
+  const next = wolfNight.slice(wolfNight.indexOf(phase) + 1).find(step =>
+    step === 'wolves' || alive.some(id => roles[id] === step));
+  if (next) {
+    w.phase = next;
+    return;
+  }
+  let dead = [];
+  let shooter = null;
+  if (night.bite && (night.bite === night.guarded) === Boolean(night.saved)) {
+    dead.push(night.bite);
+    if (roles[night.bite] === 'hunter' && night.bite !== night.poisoned) shooter = night.bite;
+  }
+  if (night.poisoned) dead = add(dead, night.poisoned);
+  Object.assign(w, { alive: alive.filter(id => !dead.includes(id)), last_dead: dead, last_event: 'dawn' });
+  finishWerewolf(w, 'day', shooter);
+}
+function werewolfView(w, me) {
+  const { roles, night, wolf_votes, votes, checks, last_guard, antidote, poison_available, after_shot, ...view } = w;
+  const role = roles?.[me];
+  view.role = role || null;
+  view.voted = Object.keys(votes || {});
+  if (w.phase === 'result') view.roles = roles;
+  if (wolfNight.includes(w.phase)) {
+    view.phase = 'night';
+    if (w.alive.includes(me) && (role === w.phase || (w.phase === 'wolves' && isWolf(role)))) view.step = w.phase;
+  }
+  if (isWolf(role)) {
+    view.team = Object.keys(roles).filter(id => isWolf(roles[id]));
+    if (w.phase === 'wolves') view.wolf_votes = wolf_votes;
+  } else if (role === 'seer') view.checks = checks;
+  else if (role === 'guard') view.last_guard = last_guard;
+  else if (role === 'witch' && view.step === 'witch') {
+    Object.assign(view, { antidote, poison_available, bite: antidote ? night.bite : null });
+  }
+  return view;
+}
+
 const roomPlayers = (db, room) => db.players.filter(p => p.room_id === room.id).sort((a, b) => a.seat - b.seat);
 const onlineIds = (db, room) => roomPlayers(db, room).filter(p => !p.left_at && Date.now() - p.last_seen < ONLINE_MS).map(p => p.id);
 function playerByToken(db, room, token) {
@@ -443,11 +588,12 @@ function playerByToken(db, room, token) {
 function mergeRoomNames(db, room) {
   const active = roomPlayers(db, room).filter(p => !p.alias_of);
   if (new Set(active.map(p => p.nickname)).size === active.length) return room.state;
-  const st = clone(room.state), { bluff: b, dice: d, king: k, truth: t, undercover: u } = st;
+  const st = clone(room.state), { bluff: b, dice: d, king: k, truth: t, undercover: u, werewolf: w } = st;
   const reserved = new Set([
     ...(['recruit', 'roles', 'choose', 'think', 'speak', 'guess'].includes(b?.phase) ? b.players : []),
     ...(d?.phase === 'rolling' ? d.participants : []),
     ...(['discuss', 'vote'].includes(u?.phase) ? u.players : []),
+    ...(w && !['setup', 'result'].includes(w.phase) ? w.players : []),
     ...(['command', 'challenge', 'handover'].includes(k?.phase) ? [k.king, ...Object.keys(k.numbers)] : []),
     ...(['choose', 'question'].includes(t?.phase) ? [...(t.askers || []), ...tDoers(t), t.q?.target] : [])
   ]);
@@ -514,6 +660,7 @@ function view(db, room, me) {
     delete u.votes; delete u.used;
     if (u.phase !== 'result') { delete u.civil_word; delete u.spy_word; delete u.spies; delete u.whiteboard; }
   }
+  if (st.werewolf) st.werewolf = werewolfView(st.werewolf, me);
   delete st.used_q; delete st.game; delete st.proposal; delete st.bluff_next_q; delete st.bluff_next_honest;
   const roster = roomPlayers(db, room);
   const aliasNames = Object.fromEntries(roster.filter(a => a.alias_of).flatMap(a => {
@@ -643,6 +790,7 @@ const mock = {
     const ag = ['ready', 'unready', 'roll', 'next_round', 'to_truth'].includes(action) ? 'dice'
       : action.startsWith('t_') ? 'truth' : action.startsWith('k_') ? 'king' : action.startsWith('b_') ? 'bluff'
       : action.startsWith('u_') ? 'undercover'
+      : action.startsWith('w_') ? 'werewolf'
       : action === 'propose' ? ((a.payload && a.payload.game) || st.where[me] || null)
       : action === 'pause' ? (st.where[me] || null) : null;
     const online = here(st, allOnline, ag);
@@ -653,7 +801,9 @@ const mock = {
     else if (action === 'goto') {
       // 进入某个游戏页面（null = 回大厅），不用别人同意
       const g = a.game ?? null;
+      const w = st.werewolf;
       if (g !== null && !GAMES_READY.includes(g)) err = 'not_ready';
+      else if (g === 'werewolf' && w && !['setup', 'result'].includes(w.phase) && !w.players.includes(me)) err = 'werewolf_in_progress';
       else {
         st.where = { ...st.where, [me]: g };
         if (g === 'dice') {
@@ -671,6 +821,7 @@ const mock = {
           st.king = k;
         }
         if (g === 'bluff' && !st.bluff) st.bluff = bluffInit();
+        if (g === 'werewolf' && !w) st.werewolf = { phase: 'setup' };
         if (g === 'undercover') {
           const u = st.undercover || { phase: 'setup' };
           if (['discuss', 'vote'].includes(u.phase) && !u.players.includes(me)) {
@@ -794,6 +945,10 @@ const mock = {
         if (t.mode !== 'dice') err = 'phase';
         else { st.game = 'dice'; st.dice = diceNewRound(st.dice || diceInit(), online); moveWhere(st, 'truth', 'dice'); }
       } else err = 'bad_action';
+    } else if (action.startsWith('w_')) {
+      if (!st.werewolf || !online.includes(me)) err = 'no_game';
+      else if (paused) err = 'paused';
+      else err = werewolfAction(st, online, me, action, a);
     } else if (action.startsWith('u_')) {
       if (!st.undercover || !online.includes(me)) err = 'no_game';
       else if (paused) err = 'paused';
@@ -893,7 +1048,7 @@ const mock = {
     if (!p || p.left_at) return { ok: true };
     p.left_at = Date.now();
     let st = clone(room.state);
-    if (st.where && !['bluff', 'undercover'].includes(st.where[p.id])) { st.where = { ...st.where }; delete st.where[p.id]; }
+    if (st.where && !['bluff', 'undercover', 'werewolf'].includes(st.where[p.id])) { st.where = { ...st.where }; delete st.where[p.id]; }
     if (st.dice) {
       st.dice.ready = del(st.dice.ready, p.id);
       if (st.dice.phase === 'rolling' && !st.dice.done.includes(p.id)) st.dice.participants = del(st.dice.participants, p.id);
