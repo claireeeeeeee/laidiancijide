@@ -764,7 +764,7 @@ begin
       for item in select key, value from jsonb_each_text(b->'stats'->duplicate.source) loop
         stats := public._ldc_inc(stats, item.key, item.value::int);
       end loop;
-      b := jsonb_set(b, '{stats}', (b->'stats' - duplicate.source) || jsonb_build_object(duplicate.target, stats));
+      b := jsonb_set(b, '{stats}', ((b->'stats') - duplicate.source) || jsonb_build_object(duplicate.target, stats));
     end if;
     if t->>'mode' = 'turns' and t->'order' ? duplicate.source then
       t := t || jsonb_build_object('order', public._ldc_del(t->'order', duplicate.source),
