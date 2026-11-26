@@ -6,7 +6,7 @@ const cfg = window.LDC_CONFIG || {};
 const params = new URLSearchParams(location.search);
 const MOCK = params.has('mock') || !cfg.supabaseUrl || !cfg.supabaseAnonKey;
 const ONLINE_MS = 20000;
-const VOTE_MS = 20000;
+const ACTION_MS = 45000;
 const GAMES_READY = ['dice', 'truth', 'king', 'bluff', 'undercover', 'werewolf'];
 
 // ---------- 正式版 ----------
@@ -33,10 +33,9 @@ const real = {
   bluffControl: (code, accessKey, action, id) => rpc('ldc_bluff_control', {
     p_code: code, p_access_key: accessKey, p_action: action, p_question_id: id || null
   }),
-  join: (code, name, token) => rpc('ldc_join', { p_code: code, p_name: name || '', p_token: token || '' }),
-  act: (code, token, action, args) => rpc('ldc_act', { p_code: code, p_token: token, p_action: action, p_args: args || {} }),
-  rename: (code, token, name) => rpc('ldc_rename', { p_code: code, p_token: token, p_name: name }),
-  leave: (code, token) => rpc('ldc_leave', { p_code: code, p_token: token })
+  join: code => window.LdcAccount.scoped('room',code,'join'),
+  act: (code, token, action, args) => window.LdcAccount.scoped('room',code,'act',{action,args:args||{}}),
+  leave: code => window.LdcAccount.scoped('room',code,'leave')
 };
 
 // ---------- 模拟数据库（规则对照 supabase_setup.sql） ----------
@@ -51,11 +50,15 @@ const name12 = s => { s = String(s || '').trim(); const n = [...s].length; retur
 const add = (arr, v) => (arr || []).includes(v) ? (arr || []) : [...(arr || []), v];
 const del = (arr, v) => (arr || []).filter(x => x !== v);
 const subset = (a, b) => (a || []).every(x => (b || []).includes(x));
+const onlineQuorum = (participants, online, submitted) => {
+  const active = participants.filter(id => online.includes(id));
+  return active.length > 0 && subset(active, submitted);
+};
 
 const diceInit = () => ({ phase: 'ready', round: 0, ready: [], participants: [], done: [], results: {}, askers: [], takers: [], all_same: false, history: [] });
 function diceNewRound(d, online) {
   if (online.length < 2) return { ...d, phase: 'ready', ready: [], participants: [], done: [], results: {}, askers: [], takers: [], all_same: false };
-  return { ...d, phase: 'rolling', round: (d.round || 0) + 1, ready: [], participants: online.slice(), done: [], results: {}, askers: [], takers: [], all_same: false };
+  return { ...d, phase: 'rolling', round: (d.round || 0) + 1, ready: [], participants: online.slice(), done: [], results: {}, askers: [], takers: [], all_same: false, roll_deadline: null };
 }
 function diceReveal(d) {
   const vals = d.participants.map(p => d.results[p]);
@@ -157,7 +160,7 @@ const bluffInit = () => ({ phase: 'setup', bank: 'mix', mode: 'knowledge', think
   players: [], want: {}, deadline: null, smart: null, volunteered: false, ...bluffFresh(), warns_left: 0,
   scores: {}, stats: {}, history: [] });
 const bluffRecruit = (b, online) => ({ ...b, ...bluffFresh(), phase: 'recruit', round: (b.round || 0) + 1, players: online.slice(), want: {},
-  deadline: Date.now() + VOTE_MS, smart: null, volunteered: false });
+  smart: null, volunteered: false });
 function bluffAssign(b) {
   const others = b.players.filter(x => x !== b.smart), roles = {}, n = b.players.length;
   const previousHonest = b.history?.[0]?.honest;
@@ -181,13 +184,11 @@ function bluffTwo(st, notIds = []) {
   const choices = fixed ? [fixed] : shuffle(available).sort((a, b) => rank(a) - rank(b)).slice(0, 2);
   return choices.map(q => ({ id: q.id, text: q.text }));
 }
-// 准备秒数（默认 30 秒）
-const bluffThink = b => ([30, 60, 120].includes(b.think) ? b.think : 30);
 function bluffBegin(st, id) {
   const q = (window.LDC_QUESTIONS || []).find(x => x.id === id && x.game === 'bluff'), b = st.bluff;
   if (!q) return st;
   st.bluff = { ...b, q: { id: q.id, text: q.text, answer: q.answer, explain: q.explain, hints: shuffle(q.hints || []) }, choices: [], phase: 'think', ready: [],
-    spoken: [], cur: null, skipped: [], timer_left: null, timer_end: Date.now() + bluffThink(b) * 1000 };
+    spoken: [], cur: null, skipped: [], timer_left: null, timer_end: null };
   st.used_q = [q.id, ...(st.used_q || [])].slice(0, 400);
   return st;
 }
@@ -226,7 +227,7 @@ function bluffSettle(st, online) {
   }
   if (b.phase === 'guess' && b.warns_left > 0) b.phase = 'speak';
   if (b.phase === 'speak') Object.assign(b, { cur: null, timer_end: null, timer_left: null, away_clock: null });
-  const now = Date.now();
+  for (const key of ['deadline','roles_deadline','timer_end','timer_left','away_clock','manual_clock']) delete b[key];
   if (['recruit', 'roles', 'choose', 'think', 'speak', 'guess'].includes(b.phase)) {
     const newcomers = online.filter(id => !b.players.includes(id));
     if (newcomers.length) {
@@ -237,35 +238,16 @@ function bluffSettle(st, online) {
         if (b.phase === 'guess') b.phase = 'speak';
       }
     }
-    const away = (b.players || []).filter(id => !online.includes(id));
-    if (away.length) {
-      if (!b.away?.length) {
-        const key = b.phase === 'recruit' ? 'deadline' : 'timer_end';
-        if (typeof b[key] === 'number') {
-          b.away_clock = { key, left: Math.max(b[key] - now, 1000) };
-          b[key] = null;
-        }
-      }
-      st.bluff = { ...b, away };
-      return st;
-    }
-    if (b.away?.length) {
-      if (b.away_clock) b[b.away_clock.key] = now + b.away_clock.left;
-      b.away = [];
-      b.away_clock = null;
-      st.bluff = b;
-      return st;
-    }
+    b.away = b.players.filter(id => !online.includes(id));
   }
-  const pon = (b.players || []).filter(x => online.includes(x));
+  const participants = b.players || [];
   if (b.phase === 'recruit') {
-    if (pon.every(x => x in b.want) || now >= b.deadline) {
-      if (pon.length < 3) b = { ...b, phase: 'setup' };
-      else {
-        const fixed = pon.includes(st.bluff_next_honest) ? st.bluff_next_honest : null;
-        const smartPool = pon.filter(x => x !== fixed);
+    if (onlineQuorum(participants, online, Object.keys(b.want))) {
+      const fixed = participants.includes(st.bluff_next_honest) ? st.bluff_next_honest : null;
+      const smartPool = participants.filter(id => online.includes(id) && id !== fixed);
+      if (smartPool.length) {
         const vol = smartPool.filter(x => b.want[x] === true);
-        b = bluffAssign({ ...b, players: pon, volunteered: vol.length > 0, smart: pick(vol.length ? vol : smartPool) });
+        b = bluffAssign({ ...b, players: participants, volunteered: vol.length > 0, smart: pick(vol.length ? vol : smartPool) });
         if (fixed) {
           const drawnHonest = Object.keys(b.roles).find(id => b.roles[id] === 'honest');
           b.roles[drawnHonest] = 'bluffer';
@@ -275,9 +257,9 @@ function bluffSettle(st, online) {
       }
     }
   } else if (b.phase === 'roles') {
-    if (pon.length && subset(pon, b.seen)) { st.bluff = b; b = { ...b, phase: 'choose', choices: bluffTwo(st) }; }   // 空数组 = 题玩完了
+    if (onlineQuorum(participants, online, b.seen)) { st.bluff = b; b = { ...b, phase: 'choose', choices: bluffTwo(st) }; }   // 空数组 = 题玩完了
   } else if (b.phase === 'think') {
-    if ((pon.length && subset(pon, b.ready || [])) || (typeof b.timer_end === 'number' && now >= b.timer_end))
+    if (onlineQuorum(participants, online, b.ready))
       b = { ...b, phase: 'speak', cur: null, timer_left: null, timer_end: null };
   }
   st.bluff = b; return st;
@@ -299,7 +281,7 @@ function applyProposal(st, p, online) {
   } else if (p.kind === 'resume') {
     st.paused = false; delete st.paused_by;
     if (tr && typeof tr.timer_left === 'number') st.truth = { ...tr, timer_end: Date.now() + tr.timer_left, timer_left: null };
-    if (st.bluff && typeof st.bluff.timer_left === 'number') st.bluff = { ...st.bluff, timer_end: Date.now() + st.bluff.timer_left, timer_left: null };
+    if (typeof d?.roll_left === 'number') { d.roll_deadline = Date.now() + d.roll_left; delete d.roll_left; }
   } else if (p.kind === 'restart_round' && st.game === 'bluff') {
     const b = st.bluff;
     st.bluff = { ...b, ...bluffFresh(), phase: 'setup', smart: null,
@@ -339,13 +321,33 @@ function settle(st, online) {
     let d = st.dice; const h = here(st, online, 'dice');
     if (d.phase === 'ready' && h.length >= 2 && subset(h, d.ready)) d = diceNewRound(d, h);
     else if (d.phase === 'rolling') {
+      d.roll_deadline ??= Date.now() + ACTION_MS;
+      const expired = Date.now() >= d.roll_deadline;
       const need = d.participants.filter(x => !online.includes(x) || h.includes(x));   // 去了别的页面的人不再等
-      if (!d.done.length && !need.length) d = { ...d, phase: 'ready', ready: [] };
-      else if (d.done.length && subset(need, d.done)) d = diceReveal({ ...d, participants: d.participants.filter(x => d.done.includes(x)) });
+      if (!d.done.length && (!need.length || expired)) d = { ...d, phase: 'ready', ready: [] };
+      else if (d.done.length && (subset(need, d.done) || expired)) d = diceReveal({ ...d, participants: d.participants.filter(x => d.done.includes(x)) });
     }
     st.dice = d;
   }
   if (st.bluff && pg !== 'bluff') st = bluffSettle(st, here(st, online, 'bluff'));
+  const now = Date.now(), u = st.undercover, w = st.werewolf;
+  if (u?.phase === 'vote' && pg !== 'undercover') {
+    delete u.vote_deadline;
+    if (onlineQuorum(u.alive, here(st, online, 'undercover'), Object.keys(u.votes))) tallyUndercover(u);
+  }
+  if (w?.phase === 'vote' && pg !== 'werewolf') {
+    delete w.action_deadline;
+    if (onlineQuorum(w.alive, here(st, online, 'werewolf'), Object.keys(w.votes))) tallyWerewolf(w);
+  } else if (w && [...wolfNight, 'shot'].includes(w.phase) && pg !== 'werewolf') {
+    w.action_deadline ??= now + ACTION_MS;
+    if (now >= w.action_deadline) {
+      if (w.phase === 'shot') finishWerewolf(w, w.after_shot);
+      else {
+        if (w.phase === 'guard') delete w.last_guard;
+        werewolfNightStep(w, now);
+      }
+    }
+  }
   return st;
 }
 const undercoverPairs = [
@@ -411,7 +413,7 @@ function undercoverAction(st, online, me, action, args) {
   if (!u.alive?.includes(me)) return 'not_in_round';
   if (action === 'u_open_vote') {
     if (u.phase !== 'discuss') return 'phase';
-    Object.assign(u, { phase: 'vote', ballot: (u.ballot || 0) + 1, votes: {}, targets: [...u.alive], runoff: false });
+    Object.assign(u, { phase: 'vote', ballot: (u.ballot || 0) + 1, votes: {}, targets: [...u.alive], runoff: false, no_votes: false });
     return;
   }
   if (action !== 'u_vote') return 'bad_action';
@@ -420,14 +422,22 @@ function undercoverAction(st, online, me, action, args) {
   if (u.votes[me]) return 'already_voted';
   u.votes[me] = args.player;
   if (Object.keys(u.votes).length < u.alive.length) return;
+  tallyUndercover(u);
+}
+function tallyUndercover(u) {
   const totals = Object.values(u.votes).reduce((counts, player) => inc(counts, player, 1), {});
+  if (!Object.keys(totals).length) {
+    delete u.votes; delete u.targets; delete u.runoff; delete u.vote_deadline;
+    Object.assign(u, { phase: 'discuss', no_votes: true, last_tied: false, last_out: null });
+    return;
+  }
   const top = Math.max(...Object.values(totals));
   const leaders = Object.keys(totals).filter(id => totals[id] === top);
   if (leaders.length > 1 && !u.runoff) {
     Object.assign(u, { ballot: u.ballot + 1, targets: leaders, votes: {}, runoff: true });
     return;
   }
-  delete u.votes; delete u.targets; delete u.runoff;
+  delete u.votes; delete u.targets; delete u.runoff; delete u.vote_deadline;
   if (leaders.length > 1) {
     Object.assign(u, { phase: 'discuss', last_tied: true, last_out: null });
     return;
@@ -446,16 +456,16 @@ const isWolf = role => role === 'wolf' || role === 'king';
 const wolfNight = ['guard', 'wolves', 'seer', 'witch'];
 function finishWerewolf(w, next, shooter = null) {
   if (shooter && w.alive.length) {
-    Object.assign(w, { phase: 'shot', shooter, after_shot: next });
+    Object.assign(w, { phase: 'shot', shooter, after_shot: next, action_deadline: Date.now() + ACTION_MS });
     return;
   }
-  delete w.shooter; delete w.after_shot;
+  delete w.shooter; delete w.after_shot; delete w.action_deadline;
   const living = w.alive.map(id => w.roles[id]);
   const wolves = living.filter(isWolf).length;
   if (!wolves || !living.includes('villager') || !living.some(role => ['seer', 'witch', 'hunter', 'guard'].includes(role))) {
     Object.assign(w, { phase: 'result', winner: wolves ? 'wolves' : 'good' });
   } else if (next === 'guard') {
-    Object.assign(w, { phase: living.includes('guard') ? 'guard' : 'wolves', night_no: w.night_no + 1, night: {}, wolf_votes: {} });
+    Object.assign(w, { phase: living.includes('guard') ? 'guard' : 'wolves', night_no: w.night_no + 1, night: {}, wolf_votes: {}, action_deadline: Date.now() + ACTION_MS });
   } else w.phase = next;
 }
 function werewolfAction(st, online, me, action, a) {
@@ -466,7 +476,7 @@ function werewolfAction(st, online, me, action, a) {
     if (online.length !== 7) return 'werewolf_people';
     const roles = Object.fromEntries(shuffle(online).map((id, i) => [id, wolfRoles[i]]));
     st.werewolf = { phase: 'guard', game_no: (w.game_no || 0) + 1, night_no: 1, players: online, alive: online,
-      roles, night: {}, wolf_votes: {}, antidote: true, poison_available: true, checks: [], last_dead: [] };
+      roles, night: {}, wolf_votes: {}, antidote: true, poison_available: true, checks: [], last_dead: [], action_deadline: Date.now() + ACTION_MS };
     return;
   }
   if (action === 'w_reset') {
@@ -499,22 +509,7 @@ function werewolfAction(st, online, me, action, a) {
     if (w.votes[me]) return 'already_voted';
     w.votes[me] = target;
     if (Object.keys(w.votes).length < alive.length) return;
-    const totals = Object.values(w.votes).reduce((counts, id) => inc(counts, id, 1), {});
-    const top = Math.max(...Object.values(totals));
-    const leaders = Object.keys(totals).filter(id => totals[id] === top);
-    if (leaders.length > 1 && !w.runoff) {
-      Object.assign(w, { ballot: w.ballot + 1, targets: leaders, votes: {}, runoff: true });
-      return;
-    }
-    delete w.votes; delete w.targets; delete w.runoff;
-    if (leaders.length > 1) {
-      Object.assign(w, { last_dead: [], last_event: 'tie' });
-      finishWerewolf(w, 'guard');
-    } else {
-      const out = leaders[0];
-      Object.assign(w, { alive: del(alive, out), last_dead: leaders, last_event: 'exile' });
-      finishWerewolf(w, 'guard', ['hunter', 'king'].includes(roles[out]) ? out : null);
-    }
+    tallyWerewolf(w);
     return;
   }
   if (action !== 'w_night') return 'bad_action';
@@ -542,10 +537,14 @@ function werewolfAction(st, online, me, action, a) {
     w.poison_available = false;
     night.poisoned = target;
   } else if (a.mode !== 'pass') return 'bad_action';
+  werewolfNightStep(w, Date.now());
+}
+function werewolfNightStep(w, now) {
+  const { phase, alive, roles, night } = w;
   const next = wolfNight.slice(wolfNight.indexOf(phase) + 1).find(step =>
     step === 'wolves' || alive.some(id => roles[id] === step));
   if (next) {
-    w.phase = next;
+    Object.assign(w, { phase: next, action_deadline: now + ACTION_MS });
     return;
   }
   let dead = [];
@@ -558,6 +557,28 @@ function werewolfAction(st, online, me, action, a) {
   Object.assign(w, { alive: alive.filter(id => !dead.includes(id)), last_dead: dead, last_event: 'dawn' });
   finishWerewolf(w, 'day', shooter);
 }
+function tallyWerewolf(w) {
+  const { alive, roles } = w;
+  const totals = Object.values(w.votes).reduce((counts, id) => inc(counts, id, 1), {});
+  const top = Math.max(...Object.values(totals));
+  const leaders = Object.keys(totals).filter(id => totals[id] === top);
+  if (leaders.length > 1 && !w.runoff) {
+    Object.assign(w, { ballot: w.ballot + 1, targets: leaders, votes: {}, runoff: true });
+    return;
+  }
+  delete w.votes; delete w.targets; delete w.runoff;
+  if (!leaders.length) {
+    Object.assign(w, { last_dead: [], last_event: 'no_votes' });
+    finishWerewolf(w, 'guard');
+  } else if (leaders.length > 1) {
+    Object.assign(w, { last_dead: [], last_event: 'tie' });
+    finishWerewolf(w, 'guard');
+  } else {
+    const out = leaders[0];
+    Object.assign(w, { alive: del(alive, out), last_dead: leaders, last_event: 'exile' });
+    finishWerewolf(w, 'guard', ['hunter', 'king'].includes(roles[out]) ? out : null);
+  }
+}
 function werewolfView(w, me) {
   const { roles, night, wolf_votes, votes, checks, last_guard, antidote, poison_available, after_shot, ...view } = w;
   const role = roles?.[me];
@@ -567,6 +588,7 @@ function werewolfView(w, me) {
   if (wolfNight.includes(w.phase)) {
     view.phase = 'night';
     if (w.alive.includes(me) && (role === w.phase || (w.phase === 'wolves' && isWolf(role)))) view.step = w.phase;
+    else delete view.action_deadline;
   }
   if (isWolf(role)) {
     view.team = Object.keys(roles).filter(id => isWolf(roles[id]));
@@ -649,8 +671,8 @@ function view(db, room, me) {
   if (st.bluff && !['reveal', 'final'].includes(st.bluff.phase)) {
     const mine = st.bluff.roles[me];
     st.bluff.roles = mine == null ? {} : { [me]: mine };
-    // 老实人只在思考时间看得到答案
-    if (st.bluff.q && (mine !== 'honest' || st.bluff.phase !== 'think')) { const q = { ...st.bluff.q }; delete q.answer; delete q.explain; st.bluff.q = q; }
+    // 揭晓前只给老实人发送答案。
+    if (st.bluff.q && mine !== 'honest') { const q = { ...st.bluff.q }; delete q.answer; delete q.explain; st.bluff.q = q; }
   }
   const u = st.undercover;
   if (u) {
@@ -754,16 +776,13 @@ const mock = {
       || ps.find(p => !p.alias_of && p.nickname === n);
     const tok = byToken ? token : rid(32);
     if (existing) {
-      if (st.where?.[existing.id] === 'bluff' && (existing.left_at || Date.now() - existing.last_seen >= ONLINE_MS)) {
-        st = settle(st, onlineIds(db, room));
-      }
       existing.left_at = null;
       existing.last_seen = Date.now();
       if (!byToken) db.players.push({
         id: uuid(), room_id: room.id, nickname: existing.nickname, token_hash: tok,
         seat: existing.seat, alias_of: existing.id, last_seen: Date.now(), left_at: Date.now()
       });
-      if (st.where?.[existing.id] === 'bluff') st = settle(st, onlineIds(db, room));
+      st = settle(st, onlineIds(db, room));
       commit(db, room, st);
       return { ...view(db, room, existing.id), token: tok, resumed: true };
     }
@@ -781,11 +800,9 @@ const mock = {
     if (!caller || caller.left_at) return { ok: false, error: 'not_member' };
     const merged = mergeRoomNames(db, room);
     const meP = playerByToken(db, room, token);
-    const before = room.state.where?.[meP.id] === 'bluff' && Date.now() - meP.last_seen >= ONLINE_MS
-      ? settle(merged, onlineIds(db, room)) : merged;
     meP.last_seen = Date.now();
     const me = meP.id, allOnline = onlineIds(db, room), now = Date.now();
-    let st = settle(before, allOnline), d = st.dice, err = null, res = {};
+    let st = settle(merged, allOnline), d = st.dice, err = null, res = {};
     // 这次操作属于哪个游戏；参与者 = 在线、而且在这个游戏页面的人
     const ag = ['ready', 'unready', 'roll', 'next_round', 'to_truth'].includes(action) ? 'dice'
       : action.startsWith('t_') ? 'truth' : action.startsWith('k_') ? 'king' : action.startsWith('b_') ? 'bluff'
@@ -794,6 +811,8 @@ const mock = {
       : action === 'propose' ? ((a.payload && a.payload.game) || st.where[me] || null)
       : action === 'pause' ? (st.where[me] || null) : null;
     const online = here(st, allOnline, ag);
+    const seated = ['b_start','b_next_round','u_start','w_start'].includes(action)
+      ? here(st, roomPlayers(db, room).filter(p => !p.left_at && !p.alias_of).map(p => p.id), ag) : online;
     const paused = !!st.paused && st.paused_game === ag;
     st.game = ag;
 
@@ -872,7 +891,10 @@ const mock = {
       else if (!st.paused) {
         st.paused = true; st.paused_by = me; st.paused_game = ag; st.notice = { kind: 'pause', ok: true, by: me, at: now, payload: { game: ag } };
         if (st.truth && typeof st.truth.timer_end === 'number') { st.truth.timer_left = Math.max(st.truth.timer_end - now, 0); st.truth.timer_end = null; }
-        if (st.bluff && typeof st.bluff.timer_end === 'number') { st.bluff.timer_left = Math.max(st.bluff.timer_end - now, 0); st.bluff.timer_end = null; }
+        if (ag === 'dice' && typeof d?.roll_deadline === 'number') {
+          d.roll_left = Math.max(d.roll_deadline - now,0);
+          delete d.roll_deadline;
+        }
       }
     } else if (typeof action === 'string' && action.startsWith('k_')) {
       err = paused ? 'paused' : kingAction(db, st, online, me, action, a);
@@ -948,19 +970,18 @@ const mock = {
     } else if (action.startsWith('w_')) {
       if (!st.werewolf || !online.includes(me)) err = 'no_game';
       else if (paused) err = 'paused';
-      else err = werewolfAction(st, online, me, action, a);
+      else err = werewolfAction(st, seated, me, action, a);
     } else if (action.startsWith('u_')) {
       if (!st.undercover || !online.includes(me)) err = 'no_game';
       else if (paused) err = 'paused';
-      else err = undercoverAction(st, online, me, action, a);
+      else err = undercoverAction(st, seated, me, action, a);
     } else if (action.startsWith('b_')) {
       let b = st.bluff;
       const isSmart = b?.smart === me;
       if (!b || !online.includes(me)) err = 'no_game';
       else if (paused) err = 'paused';
-      else if (b.away?.length) err = 'bluff_waiting';
-      else if (['b_setup', 'b_timer', 'b_think', 'b_start'].includes(action) && b.phase !== 'setup') err = 'phase';
-      else if (['b_setup', 'b_timer', 'b_think', 'b_start'].includes(action) && b.settings_order?.[0] !== me) err = 'bluff_settings_owner';
+      else if (['b_setup', 'b_start'].includes(action) && b.phase !== 'setup') err = 'phase';
+      else if (['b_setup', 'b_start'].includes(action) && b.settings_order?.[0] !== me) err = 'bluff_settings_owner';
       else if (action === 'b_setup') {
         if ('bank' in a) {
           if (['idiom', 'word', 'allusion', 'mix', 'story'].includes(a.bank)) {
@@ -971,22 +992,16 @@ const mock = {
         }
         if ('warn_on' in a) b.warn_on = a.warn_on !== false;
         if ('rounds' in a) { if ([0, 1, 3, 5, 8].includes(a.rounds)) b.rounds = a.rounds; else err = 'bad_action'; }
-      } else if (action === 'b_timer') {
-        const v = a.secs == null ? -1 : +a.secs;
-        if (![0, 60, 120, 180].includes(v)) err = 'bad_action';
-        else b.timer = v;
-      } else if (action === 'b_think') {
-        const v = +a.secs || 0;
-        if (![30, 60, 120].includes(v)) err = 'bad_action'; else b.think = v;
       } else if (action === 'b_ready') {
         if (b.phase !== 'think') err = 'phase';
         else if (!b.players.includes(me)) err = 'not_in_round';
         else b.ready = add(b.ready || [], me);
       } else if (action === 'b_start' || action === 'b_next_round') {
+        const participants = action === 'b_next_round' ? b.players.concat(seated.filter(id => !b.players.includes(id))) : seated;
         if (action === 'b_next_round' && b.phase !== 'reveal') err = 'phase';
         else if (action === 'b_next_round' && b.rounds > 0 && b.round >= b.rounds) err = 'finished';
-        else if (online.length < 3) err = 'need3';
-        else { b = bluffRecruit(b, online); st.invite = { game: 'bluff', by: me, what: 'start', at: now }; }
+        else if (participants.length < 3) err = 'need3';
+        else { b = bluffRecruit(b, participants); st.invite = { game: 'bluff', by: me, what: 'start', at: now }; }
       } else if (action === 'b_final') {
         if (b.phase !== 'reveal') err = 'phase'; else b.phase = 'final';
       } else if (action === 'b_again') {
@@ -1048,11 +1063,7 @@ const mock = {
     if (!p || p.left_at) return { ok: true };
     p.left_at = Date.now();
     let st = clone(room.state);
-    if (st.where && !['bluff', 'undercover', 'werewolf'].includes(st.where[p.id])) { st.where = { ...st.where }; delete st.where[p.id]; }
-    if (st.dice) {
-      st.dice.ready = del(st.dice.ready, p.id);
-      if (st.dice.phase === 'rolling' && !st.dice.done.includes(p.id)) st.dice.participants = del(st.dice.participants, p.id);
-    }
+    if (st.dice?.phase === 'ready') st.dice.ready = del(st.dice.ready, p.id);
     st = settle(st, onlineIds(db, room));
     room.state = st; room.version++; save(db);
     return { ok: true };

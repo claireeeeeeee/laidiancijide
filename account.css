@@ -1,0 +1,26 @@
+.account-link{text-decoration:none;color:inherit}
+.account-app .screen{gap:14px}
+.account-app h1,.account-app h2,.account-app p{margin-block:0}
+.account-app h2{font-size:18px}
+.account-app .qcard{display:grid;gap:12px}
+.account-app .qcard p{font-size:14px;font-weight:400}
+.account-app form{display:grid;gap:12px}
+.account-app label{display:grid;gap:5px;font-size:14px;font-weight:700;color:var(--muted)}
+.account-app input,.account-app select{min-width:0;width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--well);color:var(--ink);font:inherit;font-size:16px}
+.account-actions,.account-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.account-name{display:flex;align-items:center;gap:12px;overflow-wrap:anywhere}
+.account-avatar{display:grid;place-items:center;width:46px;aspect-ratio:1;border-radius:50%;background:var(--a2);color:var(--on-a2);font-size:22px;font-weight:800;flex:none}
+.account-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+.account-stats span{padding:10px 3px;border-radius:10px;text-align:center;background:var(--well);font-size:12px;color:var(--muted)}
+.account-stats b{display:block;color:var(--ink);font-size:22px;overflow-wrap:anywhere}
+.account-entry{border-bottom:1px solid var(--line);padding:10px 0}
+.account-entry summary{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;cursor:pointer}
+.account-entry small{display:block;color:var(--muted);margin-top:3px}
+.account-entry dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;font-size:13px}
+.account-entry dd{margin:0;overflow-wrap:anywhere}
+.account-entry .gain{color:var(--a2)}
+.account-entry .loss{color:var(--a1)}
+.account-app .note{overflow-wrap:anywhere}
+.account-app .list{min-width:0}
+.account-app .row{gap:8px}
+.account-app .row .who{overflow-wrap:anywhere}

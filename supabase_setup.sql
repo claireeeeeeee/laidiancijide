@@ -73,7 +73,7 @@ create table if not exists public.ldc_settings (
   value text not null
 );
 insert into public.ldc_settings (key, value) values ('admin_hash', 'd785779fe7f3f32f48743182bd6b5601b72435053fd3b9a482e6d5061e58e000')
-  on conflict (key) do update set value = excluded.value;
+  on conflict (key) do nothing;
 
 alter table public.ldc_settings enable row level security;
 alter table public.ldc_rooms   enable row level security;
@@ -130,8 +130,8 @@ language sql immutable as $$
 create or replace function public._ldc_dice_new_round(d jsonb, online jsonb) returns jsonb
 language sql immutable as $$
   select case when jsonb_array_length(online) < 2
-    then d || '{"phase":"ready","ready":[],"participants":[],"done":[],"results":{},"askers":[],"takers":[],"all_same":false}'::jsonb
-    else d || jsonb_build_object('phase','rolling','round',coalesce((d->>'round')::int,0)+1,'ready','[]'::jsonb,
+    then (d - 'roll_deadline') || '{"phase":"ready","ready":[],"participants":[],"done":[],"results":{},"askers":[],"takers":[],"all_same":false}'::jsonb
+    else (d - 'roll_deadline') || jsonb_build_object('phase','rolling','round',coalesce((d->>'round')::int,0)+1,'ready','[]'::jsonb,
                                  'participants',online,'done','[]'::jsonb,'results','{}'::jsonb,
                                  'askers','[]'::jsonb,'takers','[]'::jsonb,'all_same',false)
   end $$;
@@ -252,7 +252,7 @@ language sql immutable as $$
 create or replace function public._ldc_bluff_recruit(b jsonb, online jsonb) returns jsonb
 language sql volatile as $$
   select b || public._ldc_bluff_fresh() || jsonb_build_object('phase', 'recruit', 'round', coalesce((b->>'round')::int, 0) + 1,
-    'players', online, 'want', '{}'::jsonb, 'deadline', public._ldc_now_ms() + 20000, 'smart', null, 'volunteered', false) $$;
+    'players', online, 'want', '{}'::jsonb, 'smart', null, 'volunteered', false) $$;
 
 -- 分身份：大聪明以外随机一个老实人，其余都是捣蛋鬼；降低上轮老实人再次抽中的权重
 create or replace function public._ldc_bluff_assign(b jsonb) returns jsonb
@@ -319,14 +319,14 @@ end $$;
 -- 大聪明选好的题：进入准备时间，记进已出过的题
 create or replace function public._ldc_bluff_begin(st jsonb, p_id text) returns jsonb
 language plpgsql volatile as $$
-declare q public.ldc_questions; b jsonb := st->'bluff'; now_ms bigint := public._ldc_now_ms();
+declare q public.ldc_questions; b jsonb := st->'bluff';
 begin
   select * into q from public.ldc_questions where id = p_id and game_type = 'bluff';
   if not found then return st; end if;
   b := b || jsonb_build_object('q', jsonb_build_object('id', q.id, 'text', q.content, 'answer', q.answer, 'explain', q.explanation,
            'hints', public._ldc_shuffle(q.hints)),
          'choices', '[]'::jsonb, 'phase', 'think', 'ready', '[]'::jsonb, 'spoken', '[]'::jsonb, 'cur', null, 'skipped', '[]'::jsonb,
-         'timer_left', null, 'timer_end', now_ms + public._ldc_bluff_think(b) * 1000);
+         'timer_left', null, 'timer_end', null);
   st := st || jsonb_build_object('used_q', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb) from
           jsonb_array_elements(jsonb_build_array(q.id) || coalesce(st->'used_q', '[]'::jsonb)) with ordinality z(x, i) where i <= 400));
   if st->>'bluff_next_q' = q.id then st := st - 'bluff_next_q'; end if;
@@ -383,11 +383,17 @@ begin
 end $$;
 
 -- 自动推进：大家都选完（或 20 秒到）就定大聪明；大家都看过身份就给大聪明两道题选；
--- 准备时间到（或都点了准备好）就进入线下讨论。
+-- 在线玩家完成准备后进入线下讨论。
+create or replace function public._ldc_online_quorum(participants jsonb, online jsonb, submitted jsonb) returns boolean
+language sql immutable as $$
+  select count(*) > 0 and coalesce(bool_and(coalesce(submitted ? id,false)),false)
+  from jsonb_array_elements_text(participants) as p(id) where online ? id
+$$;
+
 create or replace function public._ldc_bluff_settle(st jsonb, online jsonb) returns jsonb
 language plpgsql volatile as $$
-declare b jsonb := st->'bluff'; pon jsonb; vol jsonb; everyone boolean; now_ms bigint := public._ldc_now_ms();
-        away jsonb; clock_key text; clock jsonb; present jsonb;
+declare b jsonb := st->'bluff'; participants jsonb; vol jsonb;
+        present jsonb;
         fixed_honest text; drawn_honest text; smart_pool jsonb; newcomers jsonb; new_roles jsonb;
 begin
   if b is null then return st; end if;
@@ -411,7 +417,8 @@ begin
   if b->>'phase' = 'speak' then
     b := b || '{"cur":null,"timer_end":null,"timer_left":null,"away_clock":null}'::jsonb;
   end if;
-  -- 整轮保留原名单。离开页面或断线时冻结进度，原玩家回来后接着计时。
+  b := b - 'deadline' - 'roles_deadline' - 'timer_end' - 'timer_left' - 'away_clock' - 'manual_clock';
+  -- 保留全部席位。需要玩家确认的步骤只等待当前在线的人。
   if b->>'phase' in ('recruit', 'roles', 'choose', 'think', 'speak', 'guess') then
     newcomers := public._ldc_minus(online, b->'players');
     if jsonb_array_length(newcomers) > 0 then
@@ -423,41 +430,19 @@ begin
         if b->>'phase' = 'guess' then b := b || '{"phase":"speak"}'::jsonb; end if;
       end if;
     end if;
-    away := public._ldc_minus(b->'players', online);
-    if jsonb_array_length(away) > 0 then
-      if jsonb_array_length(coalesce(b->'away', '[]'::jsonb)) = 0 then
-        clock_key := case when b->>'phase' = 'recruit' then 'deadline' else 'timer_end' end;
-        if jsonb_typeof(b->clock_key) = 'number' then
-          b := b || jsonb_build_object(clock_key, null, 'away_clock',
-            jsonb_build_object('key', clock_key, 'left', greatest((b->>clock_key)::bigint - now_ms, 1000)));
-        end if;
-      end if;
-      return jsonb_set(st, '{bluff}', b || jsonb_build_object('away', away));
-    end if;
-    if jsonb_array_length(coalesce(b->'away', '[]'::jsonb)) > 0 then
-      clock := b->'away_clock';
-      if jsonb_typeof(clock) = 'object' then
-        b := b || jsonb_build_object(clock->>'key', now_ms + (clock->>'left')::bigint);
-      end if;
-      return jsonb_set(st, '{bluff}', b || jsonb_build_object('away', '[]'::jsonb, 'away_clock', null));
-    end if;
+    b := jsonb_set(b,'{away}',public._ldc_minus(b->'players',online));
   end if;
-  pon := (select coalesce(jsonb_agg(e), '[]'::jsonb) from jsonb_array_elements_text(coalesce(b->'players', '[]'::jsonb)) e where online ? e);
+  participants := coalesce(b->'players','[]'::jsonb);
   if b->>'phase' = 'recruit' then
-    select not exists (select 1 from jsonb_array_elements_text(pon) e where not (b->'want' ? e)) into everyone;
-    if everyone or now_ms >= (b->>'deadline')::bigint then
-      if jsonb_array_length(pon) < 3 then
-        b := b || '{"phase":"setup"}'::jsonb;
-      else
-        fixed_honest := st->>'bluff_next_honest';
-        smart_pool := pon;
-        if fixed_honest is not null and pon ? fixed_honest then
-          smart_pool := public._ldc_minus(pon, jsonb_build_array(fixed_honest));
-        else
-          fixed_honest := null;
-        end if;
+    if public._ldc_online_quorum(participants,online,b->'want') then
+      fixed_honest := st->>'bluff_next_honest';
+      if fixed_honest is not null and not (participants ? fixed_honest) then fixed_honest := null; end if;
+      select coalesce(jsonb_agg(id),'[]'::jsonb) into smart_pool
+        from jsonb_array_elements_text(participants) as p(id)
+        where online ? id and id is distinct from fixed_honest;
+      if jsonb_array_length(smart_pool) > 0 then
         vol := (select coalesce(jsonb_agg(e), '[]'::jsonb) from jsonb_array_elements_text(smart_pool) e where coalesce((b->'want'->>e)::boolean, false));
-        b := b || jsonb_build_object('players', pon, 'volunteered', jsonb_array_length(vol) > 0,
+        b := b || jsonb_build_object('players', participants, 'volunteered', jsonb_array_length(vol) > 0,
                'smart', public._ldc_pick(case when jsonb_array_length(vol) > 0 then vol else smart_pool end));
         b := public._ldc_bluff_assign(b);
         if fixed_honest is not null then
@@ -470,12 +455,11 @@ begin
       end if;
     end if;
   elsif b->>'phase' = 'roles' then
-    if jsonb_array_length(pon) > 0 and public._ldc_subset(pon, b->'seen') then
+    if public._ldc_online_quorum(participants,online,b->'seen') then
       b := b || jsonb_build_object('phase', 'choose', 'choices', public._ldc_bluff_two(st, '[]'::jsonb));   -- 空数组 = 这个房间的题玩完了
     end if;
   elsif b->>'phase' = 'think' then
-    if (jsonb_array_length(pon) > 0 and public._ldc_subset(pon, b->'ready'))
-       or (jsonb_typeof(b->'timer_end') = 'number' and now_ms >= (b->>'timer_end')::bigint) then
+    if public._ldc_online_quorum(participants,online,b->'ready') then
       b := b || jsonb_build_object('phase', 'speak', 'cur', null, 'timer_left', null, 'timer_end', null);
     end if;
   end if;
@@ -606,8 +590,8 @@ begin
     if tr is not null and jsonb_typeof(tr->'timer_left') = 'number' then
       st := jsonb_set(st, '{truth}', tr || jsonb_build_object('timer_end', now_ms + (tr->>'timer_left')::bigint, 'timer_left', null));
     end if;
-    if st->'bluff' is not null and jsonb_typeof(st->'bluff'->'timer_left') = 'number' then
-      st := jsonb_set(st, '{bluff}', (st->'bluff') || jsonb_build_object('timer_end', now_ms + (st->'bluff'->>'timer_left')::bigint, 'timer_left', null));
+    if jsonb_typeof(d->'roll_left') = 'number' then
+      st := jsonb_set(st,'{dice}',(d - 'roll_left') || jsonb_build_object('roll_deadline',now_ms+(d->>'roll_left')::bigint));
     end if;
   elsif k = 'restart_round' and st->>'game' = 'bluff' then
     st := jsonb_set(st, '{bluff}', (st->'bluff') || public._ldc_bluff_fresh() || jsonb_build_object('phase', 'setup', 'smart', null,
@@ -646,19 +630,22 @@ end $$;
 -- 结算：各个游戏的自动推进（只看在这个游戏页面的在线玩家；暂停的游戏不推进）
 create or replace function public._ldc_settle(st jsonb, online jsonb, p_room uuid) returns jsonb
 language plpgsql volatile as $$
-declare d jsonb; here jsonb; need jsonb; pg text := case when coalesce((st->>'paused')::boolean, false) then st->>'paused_game' end;
+declare d jsonb; here jsonb; need jsonb; u jsonb; w jsonb; now_ms bigint := public._ldc_now_ms(); pg text := case when coalesce((st->>'paused')::boolean, false) then st->>'paused_game' end;
 begin
   if st->'dice' is not null and pg is distinct from 'dice' then
     d := st->'dice'; here := public._ldc_here(st, online, 'dice');
     if d->>'phase' = 'ready' and jsonb_array_length(here) >= 2 and public._ldc_subset(here, d->'ready') then
       d := public._ldc_dice_new_round(d, here);
     elsif d->>'phase' = 'rolling' then
-      -- 还要等的人：本轮参与者里，除了「在线但已经去了别的页面」的人
+      if jsonb_typeof(d->'roll_deadline') is distinct from 'number' then
+        d := d || jsonb_build_object('roll_deadline',now_ms + 45000);
+      end if;
+      -- 在线离开游戏页面的人、以及超时没掷骰的人不阻塞结算。
       need := (select coalesce(jsonb_agg(e), '[]'::jsonb) from jsonb_array_elements_text(d->'participants') e
                where not (online ? e) or here ? e);
-      if jsonb_array_length(d->'done') = 0 and jsonb_array_length(need) = 0 then
+      if jsonb_array_length(d->'done') = 0 and (jsonb_array_length(need) = 0 or now_ms >= (d->>'roll_deadline')::bigint) then
         d := d || '{"phase":"ready","ready":[]}'::jsonb;
-      elsif jsonb_array_length(d->'done') > 0 and public._ldc_subset(need, d->'done') then
+      elsif jsonb_array_length(d->'done') > 0 and (public._ldc_subset(need, d->'done') or now_ms >= (d->>'roll_deadline')::bigint) then
         d := jsonb_set(d, '{participants}', (select coalesce(jsonb_agg(e), '[]'::jsonb) from jsonb_array_elements_text(d->'participants') e where d->'done' ? e));
         d := public._ldc_dice_reveal(d);
         insert into public.ldc_events (room_id, kind, payload)
@@ -669,6 +656,33 @@ begin
   end if;
   if st->'bluff' is not null and pg is distinct from 'bluff' then
     st := public._ldc_bluff_settle(st, public._ldc_here(st, online, 'bluff'));
+  end if;
+  u := st->'undercover';
+  if u->>'phase'='vote' and pg is distinct from 'undercover' then
+    u := u - 'vote_deadline';
+    if public._ldc_online_quorum(u->'alive',public._ldc_here(st,online,'undercover'),u->'votes') then
+      u := public._ldc_undercover_tally(u);
+    end if;
+    st := jsonb_set(st,'{undercover}',u);
+  end if;
+  w := st->'werewolf';
+  if w->>'phase'='vote' and pg is distinct from 'werewolf' then
+    w := w - 'action_deadline';
+    if public._ldc_online_quorum(w->'alive',public._ldc_here(st,online,'werewolf'),w->'votes') then
+      w := public._ldc_werewolf_tally(w);
+    end if;
+    st := jsonb_set(st,'{werewolf}',w);
+  elsif w->>'phase' in ('guard','wolves','seer','witch','shot') and pg is distinct from 'werewolf' then
+    if jsonb_typeof(w->'action_deadline') is distinct from 'number' then
+      w := w || jsonb_build_object('action_deadline',now_ms+45000);
+    elsif now_ms >= (w->>'action_deadline')::bigint then
+      if w->>'phase'='shot' then w := public._ldc_werewolf_finish(w,w->>'after_shot');
+      else
+        if w->>'phase'='guard' then w := w - 'last_guard'; end if;
+        w := public._ldc_werewolf_night_step(w,now_ms);
+      end if;
+    end if;
+    st := jsonb_set(st,'{werewolf}',w);
   end if;
   return st;
 end $$;
@@ -689,12 +703,45 @@ language sql volatile as $$
   order by (coalesce(used, '[]'::jsonb) ? id::text), random() limit 1
 $$;
 
+create or replace function public._ldc_undercover_tally(u jsonb) returns jsonb
+language plpgsql immutable as $$
+declare
+  votes jsonb := u->'votes'; alive jsonb := u->'alive'; ballot int := (u->>'ballot')::int;
+  leaders jsonb; picked text; spy_count int; civil_count int; winner text;
+begin
+  with totals as (
+    select target, count(*) as tally from jsonb_each_text(votes) as v(voter,target) group by target
+  )
+  select jsonb_agg(target order by target) into leaders from totals where tally = (select max(tally) from totals);
+  if leaders is null then
+    return (u - 'votes' - 'targets' - 'runoff' - 'vote_deadline') ||
+      '{"phase":"discuss","no_votes":true,"last_tied":false,"last_out":null}'::jsonb;
+  end if;
+  if jsonb_array_length(leaders) > 1 then
+    if (u->>'runoff')::boolean then
+      u := (u - 'votes' - 'targets' - 'runoff' - 'vote_deadline') || '{"phase":"discuss","last_tied":true,"last_out":null}'::jsonb;
+    else
+      u := u || jsonb_build_object('ballot',ballot+1,'targets',leaders,'votes','{}'::jsonb,'runoff',true);
+    end if;
+    return u;
+  end if;
+
+  picked := leaders->>0;
+  alive := public._ldc_del(alive,picked);
+  select count(*) into spy_count from jsonb_array_elements_text(u->'spies') p(id) where alive ? id;
+  civil_count := jsonb_array_length(alive) - spy_count - case when alive ? (u->>'whiteboard') then 1 else 0 end;
+  winner := case when spy_count=0 then 'civil' when spy_count >= civil_count then 'spy' end;
+  u := (u - 'votes' - 'targets' - 'runoff' - 'vote_deadline') || jsonb_build_object('alive',alive,
+    'last_out',picked,'last_tied',false,'winner',winner,'phase',case when winner is null then 'discuss' else 'result' end);
+  return u;
+end $$;
+
 create or replace function public._ldc_undercover_action(u jsonb, online jsonb, me text, action text, args jsonb) returns jsonb
 language plpgsql volatile as $$
 declare
   pair jsonb; used jsonb; spies jsonb; alive jsonb;
   candidates jsonb; alternatives jsonb; spy text;
-  votes jsonb; leaders jsonb; picked text; spy_count int; civil_count int; winner text;
+  votes jsonb; picked text;
   whiteboard text; whiteboard_on boolean := coalesce((u->>'whiteboard_on')::boolean,false);
   ballot int := coalesce((u->>'ballot')::int, 0);
 begin
@@ -738,7 +785,7 @@ begin
   if action = 'u_open_vote' then
     if u->>'phase' <> 'discuss' then return '{"error":"phase"}'; end if;
     return jsonb_build_object('state', u || jsonb_build_object('phase','vote','ballot',ballot+1,
-      'votes','{}'::jsonb,'targets',alive,'runoff',false));
+      'votes','{}'::jsonb,'targets',alive,'runoff',false,'no_votes',false));
   end if;
   if action <> 'u_vote' then return '{"error":"bad_action"}'; end if;
   if u->>'phase' <> 'vote' or args->>'round' is distinct from u->>'round'
@@ -753,51 +800,82 @@ begin
   if not (select count(*) = jsonb_array_length(alive) from jsonb_object_keys(votes)) then
     return jsonb_build_object('state', u);
   end if;
-  with totals as (
-    select target, count(*) as tally from jsonb_each_text(votes) as v(voter,target) group by target
-  )
-  select jsonb_agg(target order by target) into leaders from totals where tally = (select max(tally) from totals);
-  if jsonb_array_length(leaders) > 1 then
-    if (u->>'runoff')::boolean then
-      u := (u - 'votes' - 'targets' - 'runoff') || '{"phase":"discuss","last_tied":true,"last_out":null}'::jsonb;
-    else
-      u := u || jsonb_build_object('ballot',ballot+1,'targets',leaders,'votes','{}'::jsonb,'runoff',true);
-    end if;
-    return jsonb_build_object('state',u);
-  end if;
-
-  picked := leaders->>0;
-  alive := public._ldc_del(alive,picked);
-  select count(*) into spy_count from jsonb_array_elements_text(u->'spies') p(id) where alive ? id;
-  civil_count := jsonb_array_length(alive) - spy_count - case when alive ? (u->>'whiteboard') then 1 else 0 end;
-  winner := case when spy_count=0 then 'civil' when spy_count >= civil_count then 'spy' end;
-  u := (u - 'votes' - 'targets' - 'runoff') || jsonb_build_object('alive',alive,
-    'last_out',picked,'last_tied',false,'winner',winner,'phase',case when winner is null then 'discuss' else 'result' end);
-  return jsonb_build_object('state',u);
+  return jsonb_build_object('state',public._ldc_undercover_tally(u));
 end $$;
 revoke all on function public._ldc_undercover_pair(jsonb), public._ldc_undercover_action(jsonb,jsonb,text,text,jsonb) from public, anon, authenticated;
 
 -- 狼人杀：固定七人局。夜间只向有权行动的人公开目标与查验结果。
 create or replace function public._ldc_werewolf_finish(w jsonb, next_phase text, shooter text default null) returns jsonb
-language plpgsql immutable as $$
+language plpgsql volatile as $$
 declare wolves int; villagers int; gods int; winner text;
 begin
   if shooter is not null and jsonb_array_length(w->'alive') > 0 then
-    return w || jsonb_build_object('phase','shot','shooter',shooter,'after_shot',next_phase);
+    return w || jsonb_build_object('phase','shot','shooter',shooter,'after_shot',next_phase,'action_deadline',public._ldc_now_ms()+45000);
   end if;
   select count(*) filter (where value in ('wolf','king')),
          count(*) filter (where value='villager'),
          count(*) filter (where value in ('seer','witch','hunter','guard'))
     into wolves,villagers,gods from jsonb_each_text(w->'roles') where w->'alive' ? key;
   winner := case when wolves=0 then 'good' when villagers=0 or gods=0 then 'wolves' end;
-  w := w - 'shooter' - 'after_shot';
+  w := w - 'shooter' - 'after_shot' - 'action_deadline';
   if winner is not null then return w || jsonb_build_object('phase','result','winner',winner); end if;
   if next_phase='guard' then
     return w || jsonb_build_object('phase',case when exists(
       select 1 from jsonb_each_text(w->'roles') where value='guard' and w->'alive' ? key
-    ) then 'guard' else 'wolves' end,'night_no',(w->>'night_no')::int+1,'night','{}'::jsonb,'wolf_votes','{}'::jsonb);
+    ) then 'guard' else 'wolves' end,'night_no',(w->>'night_no')::int+1,'night','{}'::jsonb,'wolf_votes','{}'::jsonb,'action_deadline',public._ldc_now_ms()+45000);
   end if;
   return w || jsonb_build_object('phase',next_phase);
+end $$;
+
+create or replace function public._ldc_werewolf_night_step(w jsonb, now_ms bigint) returns jsonb
+language plpgsql volatile as $$
+declare
+  ph text := w->>'phase'; roles jsonb := w->'roles'; alive jsonb := w->'alive'; night jsonb := w->'night';
+  dead jsonb := '[]'::jsonb; next_step text; bite text; poison text; shooter text;
+begin
+  for next_step in select step from unnest(array['wolves','seer','witch']) with ordinality as p(step,n)
+    where n > case ph when 'guard' then 0 when 'wolves' then 1 when 'seer' then 2 else 3 end order by n
+  loop
+    if next_step='wolves' or exists(select 1 from jsonb_each_text(roles) where value=next_step and alive ? key) then
+      return w || jsonb_build_object('phase',next_step,'action_deadline',now_ms+45000);
+    end if;
+  end loop;
+
+  bite := night->>'bite';
+  poison := night->>'poisoned';
+  if bite is not null then
+    if (bite is not distinct from night->>'guarded') = coalesce((night->>'saved')::boolean,false) then
+      dead := public._ldc_add(dead,bite);
+      if roles->>bite='hunter' and bite is distinct from poison then shooter := bite; end if;
+    end if;
+  end if;
+  if poison is not null then dead := public._ldc_add(dead,poison); end if;
+  w := w || jsonb_build_object('alive',public._ldc_minus(alive,dead),'last_dead',dead,'last_event','dawn');
+  return public._ldc_werewolf_finish(w,'day',shooter);
+end $$;
+
+create or replace function public._ldc_werewolf_tally(w jsonb) returns jsonb
+language plpgsql volatile as $$
+declare
+  votes jsonb := w->'votes'; roles jsonb := w->'roles'; alive jsonb := w->'alive';
+  ballot int := (w->>'ballot')::int; leaders jsonb; pick text; shooter text;
+begin
+    with totals as (select value, count(*) as tally from jsonb_each_text(votes) group by value)
+    select jsonb_agg(value order by value) into leaders from totals where tally=(select max(tally) from totals);
+    if jsonb_array_length(leaders)>1 and not (w->>'runoff')::boolean then
+      return w || jsonb_build_object('ballot',ballot+1,'targets',leaders,'votes','{}'::jsonb,'runoff',true);
+    end if;
+    w := w - 'votes' - 'targets' - 'runoff';
+    if leaders is null then
+      return public._ldc_werewolf_finish(w || '{"last_dead":[],"last_event":"no_votes"}'::jsonb,'guard');
+    end if;
+    if jsonb_array_length(leaders)>1 then
+      return public._ldc_werewolf_finish(w || '{"last_dead":[],"last_event":"tie"}'::jsonb,'guard');
+    end if;
+    pick := leaders->>0;
+    shooter := case when roles->>pick in ('hunter','king') then pick end;
+    w := w || jsonb_build_object('alive',public._ldc_del(alive,pick),'last_dead',leaders,'last_event','exile');
+    return public._ldc_werewolf_finish(w,'guard',shooter);
 end $$;
 
 create or replace function public._ldc_werewolf_action(w jsonb, online jsonb, me text, action text, a jsonb) returns jsonb
@@ -805,8 +883,7 @@ language plpgsql volatile as $$
 declare
   ph text := w->>'phase'; role text := w->'roles'->>me; pick text := a->>'player';
   alive jsonb := w->'alive'; roles jsonb := w->'roles'; night jsonb := w->'night';
-  votes jsonb; leaders jsonb; wolf_ids jsonb; dead jsonb := '[]'::jsonb;
-  next_step text; bite text; poison text; shooter text; mode text := a->>'mode';
+  votes jsonb; wolf_ids jsonb; bite text; mode text := a->>'mode';
   ballot int := coalesce((w->>'ballot')::int,0);
 begin
   if action='w_start' then
@@ -816,7 +893,8 @@ begin
       into roles from jsonb_array_elements_text(public._ldc_shuffle(online)) with ordinality as p(id,slot);
     return jsonb_build_object('state',jsonb_build_object('phase','guard','game_no',coalesce((w->>'game_no')::int,0)+1,
       'night_no',1,'players',online,'alive',online,'roles',roles,'night','{}'::jsonb,'wolf_votes','{}'::jsonb,
-      'antidote',true,'poison_available',true,'checks','[]'::jsonb,'last_dead','[]'::jsonb));
+      'antidote',true,'poison_available',true,'checks','[]'::jsonb,'last_dead','[]'::jsonb,
+      'action_deadline',public._ldc_now_ms()+45000));
   end if;
   if action='w_reset' then
     if ph in ('setup','result') then return '{"error":"phase"}'; end if;
@@ -847,19 +925,7 @@ begin
     votes := votes || jsonb_build_object(me,pick);
     w := jsonb_set(w,'{votes}',votes);
     if (select count(*) from jsonb_object_keys(votes)) < jsonb_array_length(alive) then return jsonb_build_object('state',w); end if;
-    with totals as (select value, count(*) as tally from jsonb_each_text(votes) group by value)
-    select jsonb_agg(value order by value) into leaders from totals where tally=(select max(tally) from totals);
-    if jsonb_array_length(leaders)>1 and not (w->>'runoff')::boolean then
-      return jsonb_build_object('state',w || jsonb_build_object('ballot',ballot+1,'targets',leaders,'votes','{}'::jsonb,'runoff',true));
-    end if;
-    w := w - 'votes' - 'targets' - 'runoff';
-    if jsonb_array_length(leaders)>1 then
-      return jsonb_build_object('state',public._ldc_werewolf_finish(w || '{"last_dead":[],"last_event":"tie"}'::jsonb,'guard'));
-    end if;
-    pick := leaders->>0;
-    shooter := case when roles->>pick in ('hunter','king') then pick end;
-    w := w || jsonb_build_object('alive',public._ldc_del(alive,pick),'last_dead',leaders,'last_event','exile');
-    return jsonb_build_object('state',public._ldc_werewolf_finish(w,'guard',shooter));
+    return jsonb_build_object('state',public._ldc_werewolf_tally(w));
   end if;
   if action <> 'w_night' then return '{"error":"bad_action"}'; end if;
   if a->>'night' is distinct from w->>'night_no' or a->>'step' is distinct from ph
@@ -903,28 +969,11 @@ begin
     elsif mode is distinct from 'pass' then return '{"error":"bad_action"}'; end if;
   end if;
   w := jsonb_set(w,'{night}',night);
-  for next_step in select step from unnest(array['wolves','seer','witch']) with ordinality as p(step,n)
-    where n > case ph when 'guard' then 0 when 'wolves' then 1 when 'seer' then 2 else 3 end order by n
-  loop
-    if next_step='wolves' or exists(select 1 from jsonb_each_text(roles) where value=next_step and alive ? key) then
-      return jsonb_build_object('state',w || jsonb_build_object('phase',next_step));
-    end if;
-  end loop;
-
-  bite := night->>'bite';
-  poison := night->>'poisoned';
-  if bite is not null then
-    if (bite is not distinct from night->>'guarded') = coalesce((night->>'saved')::boolean,false) then
-      dead := public._ldc_add(dead,bite);
-      if roles->>bite='hunter' and bite is distinct from poison then shooter := bite; end if;
-    end if;
-  end if;
-  if poison is not null then dead := public._ldc_add(dead,poison); end if;
-  w := w || jsonb_build_object('alive',public._ldc_minus(alive,dead),'last_dead',dead,'last_event','dawn');
-  return jsonb_build_object('state',public._ldc_werewolf_finish(w,'day',shooter));
+  return jsonb_build_object('state',public._ldc_werewolf_night_step(w,public._ldc_now_ms()));
 end $$;
 
-revoke all on function public._ldc_werewolf_finish(jsonb,text,text), public._ldc_werewolf_action(jsonb,jsonb,text,text,jsonb)
+revoke all on function public._ldc_online_quorum(jsonb,jsonb,jsonb), public._ldc_undercover_tally(jsonb), public._ldc_werewolf_night_step(jsonb,bigint),
+  public._ldc_werewolf_tally(jsonb), public._ldc_werewolf_finish(jsonb,text,text), public._ldc_werewolf_action(jsonb,jsonb,text,text,jsonb)
   from public, anon, authenticated;
 
 create or replace function public._ldc_view(p_room uuid, p_me uuid) returns jsonb
@@ -946,8 +995,7 @@ begin
   if st->'bluff' is not null and st->'bluff'->>'phase' not in ('reveal', 'final') then
     mine := st->'bluff'->'roles'->(p_me::text);
     st := jsonb_set(st, '{bluff,roles}', case when mine is null then '{}'::jsonb else jsonb_build_object(p_me::text, mine) end);
-    -- 老实人只在思考时间看得到答案（发言时不能看着手机念）
-    if jsonb_typeof(st->'bluff'->'q') = 'object' and (mine is null or mine #>> '{}' <> 'honest' or st->'bluff'->>'phase' <> 'think') then
+    if jsonb_typeof(st->'bluff'->'q') = 'object' and (mine is null or mine #>> '{}' <> 'honest') then
       st := jsonb_set(st, '{bluff,q}', (st->'bluff'->'q') - 'answer' - 'explain');
     end if;
   end if;
@@ -982,7 +1030,7 @@ begin
       game_view := game_view || '{"phase":"night"}'::jsonb;
       if (w->'alive') ? p_me::text and (role=w->>'phase' or (w->>'phase'='wolves' and role in ('wolf','king'))) then
         game_view := game_view || jsonb_build_object('step',w->>'phase');
-      end if;
+      else game_view := game_view - 'action_deadline'; end if;
     end if;
     if role in ('wolf','king') then
       game_view := game_view || jsonb_build_object('team',
@@ -1123,7 +1171,7 @@ language sql security definer set search_path = public as $$
 -- 加入房间：有效凭据或同房间同昵称均恢复原座位，同名换设备时保留旧设备凭据。
 create or replace function public.ldc_join(p_code text, p_name text, p_token text) returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare r ldc_rooms; n text := btrim(coalesce(p_name,'')); v_pid uuid; v_tok text; st jsonb; online jsonb;
+declare r ldc_rooms; n text := btrim(coalesce(p_name,'')); v_pid uuid; v_tok text; st jsonb;
 begin
   select * into r from ldc_rooms where code = p_code for update;
   if not found then return '{"ok":false,"error":"not_found"}'; end if;
@@ -1149,13 +1197,8 @@ begin
     end if;
   end if;
   if v_pid is not null then
-    online := _ldc_online(r.id);
     update ldc_players set left_at = null, last_seen = now() where id = v_pid;
-    if st->'where'->>v_pid::text = 'bluff' and
-        (not coalesce((st->>'paused')::boolean, false) or st->>'paused_game' is distinct from 'bluff') then
-      if not (online ? v_pid::text) then st := _ldc_bluff_settle(st, _ldc_here(st, online, 'bluff')); end if;
-      st := _ldc_bluff_settle(st, _ldc_here(st, _ldc_online(r.id), 'bluff'));
-    end if;
+    st := _ldc_settle(st,_ldc_online(r.id),r.id);
     if st is distinct from r.state then
       update ldc_rooms set state = st, version = version + 1, updated_at = now() where id = r.id;
     end if;
@@ -1179,7 +1222,7 @@ declare
   r ldc_rooms; v_pid uuid; me text; online jsonb; st jsonb; st0 jsonb; d jsonb;
   err text; res jsonb := '{}'::jsonb; p jsonb; k text; g text; t text; v int; now_ms bigint := _ldc_now_ms();
   a jsonb := coalesce(p_args, '{}'::jsonb); tr jsonb; paused boolean; king_result jsonb; bl jsonb;
-  all_online jsonb; ag text; kg jsonb; u jsonb; undercover_result jsonb; w jsonb; werewolf_result jsonb;
+  all_online jsonb; ag text; kg jsonb; u jsonb; undercover_result jsonb; w jsonb; werewolf_result jsonb; seated jsonb;
 begin
   select * into r from ldc_rooms where code = p_code for update;
   if not found then return '{"ok":false,"error":"not_found"}'; end if;
@@ -1189,7 +1232,6 @@ begin
   ) then return '{"ok":false,"error":"not_member"}'; end if;
   st0 := r.state;
   st := _ldc_merge_names(r.id, st0);
-  online := _ldc_online(r.id);
   update ldc_players set last_seen = now()
     where room_id = r.id and left_at is null and id = (
       select coalesce(p.alias_of, p.id) from ldc_players p
@@ -1198,10 +1240,6 @@ begin
   if v_pid is null then return '{"ok":false,"error":"not_member"}'; end if;
   me := v_pid::text;
   all_online := _ldc_online(r.id);
-  if st->'where'->>me = 'bluff' and not (online ? me) and
-      (not coalesce((st->>'paused')::boolean, false) or st->>'paused_game' is distinct from 'bluff') then
-    st := _ldc_bluff_settle(st, _ldc_here(st, online, 'bluff'));
-  end if;
   st := _ldc_settle((st - 'game' - 'proposal') || jsonb_build_object('where', coalesce(st->'where', '{}'::jsonb)), all_online, r.id);
   d := st->'dice';
   -- 这次操作属于哪个游戏；参与者 = 在线、而且在这个游戏页面的人
@@ -1214,6 +1252,10 @@ begin
   online := _ldc_here(st, all_online, ag);
   st := st || jsonb_build_object('game', ag);
   paused := coalesce((st->>'paused')::boolean, false) and st->>'paused_game' is not distinct from ag;
+  if p_action in ('b_start','b_next_round','u_start','w_start') then
+    select coalesce(jsonb_agg(id::text order by seat),'[]'::jsonb) into seated
+      from ldc_players where room_id=r.id and left_at is null and alias_of is null and st->'where'->>id::text=ag;
+  end if;
 
   if p_action = 'state' then
     null;
@@ -1309,9 +1351,8 @@ begin
       if tr is not null and jsonb_typeof(tr->'timer_end') = 'number' then
         st := jsonb_set(st, '{truth}', tr || jsonb_build_object('timer_left', greatest((tr->>'timer_end')::bigint - now_ms, 0), 'timer_end', null));
       end if;
-      bl := st->'bluff';
-      if bl is not null and jsonb_typeof(bl->'timer_end') = 'number' then
-        st := jsonb_set(st, '{bluff}', bl || jsonb_build_object('timer_left', greatest((bl->>'timer_end')::bigint - now_ms, 0), 'timer_end', null));
+      if ag='dice' and jsonb_typeof(d->'roll_deadline') = 'number' then
+        st := jsonb_set(st,'{dice}',(d - 'roll_deadline') || jsonb_build_object('roll_left',greatest((d->>'roll_deadline')::bigint-now_ms,0)));
       end if;
     end if;
 
@@ -1440,7 +1481,7 @@ begin
     if st->'werewolf' is null or not (online ? me) then err := 'no_game';
     elsif paused then err := 'paused';
     else
-      werewolf_result := _ldc_werewolf_action(st->'werewolf',online,me,p_action,a);
+      werewolf_result := _ldc_werewolf_action(st->'werewolf',case when p_action='w_start' then seated else online end,me,p_action,a);
       err := werewolf_result->>'error';
       if err is null then st := jsonb_set(st,'{werewolf}',werewolf_result->'state'); end if;
     end if;
@@ -1448,7 +1489,7 @@ begin
     if st->'undercover' is null or not (online ? me) then err := 'no_game';
     elsif paused then err := 'paused';
     else
-      undercover_result := _ldc_undercover_action(st->'undercover',online,me,p_action,a);
+      undercover_result := _ldc_undercover_action(st->'undercover',case when p_action='u_start' then seated else online end,me,p_action,a);
       err := undercover_result->>'error';
       if err is null then st := jsonb_set(st,'{undercover}',undercover_result->'state'); end if;
     end if;
@@ -1456,9 +1497,8 @@ begin
     bl := st->'bluff';
     if bl is null or not (online ? me) then err := 'no_game';
     elsif paused then err := 'paused';
-    elsif jsonb_array_length(coalesce(bl->'away', '[]'::jsonb)) > 0 then err := 'bluff_waiting';
-    elsif p_action in ('b_setup', 'b_timer', 'b_think', 'b_start') and bl->>'phase' <> 'setup' then err := 'phase';
-    elsif p_action in ('b_setup', 'b_timer', 'b_think', 'b_start') and bl->'settings_order'->>0 is distinct from me then err := 'bluff_settings_owner';
+    elsif p_action in ('b_setup', 'b_start') and bl->>'phase' <> 'setup' then err := 'phase';
+    elsif p_action in ('b_setup', 'b_start') and bl->'settings_order'->>0 is distinct from me then err := 'bluff_settings_owner';
 
     elsif p_action = 'b_setup' then
       if a ? 'bank' then
@@ -1474,18 +1514,6 @@ begin
         if a->>'rounds' in ('0', '1', '3', '5', '8') then bl := bl || jsonb_build_object('rounds', (a->>'rounds')::int); else err := 'bad_action'; end if;
       end if;
 
-    elsif p_action = 'b_timer' then
-      v := coalesce((a->>'secs')::int, -1);
-      if v not in (0, 60, 120, 180) then err := 'bad_action';
-      else bl := bl || jsonb_build_object('timer', v);
-      end if;
-
-    elsif p_action = 'b_think' then
-      v := coalesce((a->>'secs')::int, 0);
-      if v not in (30, 60, 120) then err := 'bad_action';
-      else bl := bl || jsonb_build_object('think', v);
-      end if;
-
     elsif p_action = 'b_ready' then
       if bl->>'phase' <> 'think' then err := 'phase';
       elsif not (bl->'players' ? me) then err := 'not_in_round';
@@ -1493,11 +1521,14 @@ begin
       end if;
 
     elsif p_action in ('b_start', 'b_next_round') then
+      if p_action = 'b_next_round' then
+        seated := (bl->'players') || _ldc_minus(seated,bl->'players');
+      end if;
       if p_action = 'b_next_round' and bl->>'phase' <> 'reveal' then err := 'phase';
       elsif p_action = 'b_next_round' and coalesce((bl->>'rounds')::int, 0) > 0 and (bl->>'round')::int >= (bl->>'rounds')::int then err := 'finished';
-      elsif jsonb_array_length(online) < 3 then err := 'need3';
+      elsif jsonb_array_length(seated) < 3 then err := 'need3';
       else
-        bl := _ldc_bluff_recruit(bl, online);
+        bl := _ldc_bluff_recruit(bl,seated);
         st := st || jsonb_build_object('invite', jsonb_build_object('game', 'bluff', 'by', me, 'what', 'start', 'at', now_ms));
       end if;
 
@@ -1617,17 +1648,10 @@ begin
     select coalesce(p.alias_of, p.id) from ldc_players p where p.room_id = r.id and p.token_hash = _ldc_hash(p_token)
   ) returning id into v_pid;
   if v_pid is null then return '{"ok":true}'; end if;
-  -- 摇骰时离开且还没摇：从本轮移除，避免卡住其他人
+  -- 保留所有已入座游戏及进行中的席位，超时由游戏本身结算。
   st := r.state; d := st->'dice';
-  if coalesce(st->'where'->>v_pid::text,'') not in ('bluff','undercover','werewolf') then
-    st := jsonb_set(st, '{where}', coalesce(st->'where', '{}'::jsonb) - v_pid::text);
-  end if;
-  if d is not null then
-    d := jsonb_set(d, '{ready}', _ldc_del(d->'ready', v_pid::text));
-    if d->>'phase' = 'rolling' and not (d->'done' ? v_pid::text) then
-      d := jsonb_set(d, '{participants}', _ldc_del(d->'participants', v_pid::text));
-    end if;
-    st := jsonb_set(st, '{dice}', d);
+  if d->>'phase'='ready' then
+    st := jsonb_set(st,'{dice,ready}',_ldc_del(d->'ready',v_pid::text));
   end if;
   st := _ldc_settle(st, _ldc_online(r.id), r.id);
   update ldc_rooms set state = st, version = version + 1, updated_at = now() where id = r.id;
@@ -1723,9 +1747,15 @@ revoke all on function public._ldc_hash(text), public._ldc_now_ms(), public._ldc
 revoke all on function public._ldc_king_setup(text,int), public._ldc_king_round(jsonb,text,jsonb,boolean),
   public._ldc_king_clear(jsonb), public._ldc_king_action(jsonb,jsonb,text,text,jsonb) from public, anon, authenticated;
 revoke all on function public.ldc_create_room(text,text), public.ldc_admin_rooms(text), public.ldc_join(text,text,text), public.ldc_act(text,text,text,jsonb),
-  public.ldc_rename(text,text,text), public.ldc_leave(text,text) from public;
-grant execute on function public.ldc_create_room(text,text), public.ldc_admin_rooms(text), public.ldc_join(text,text,text), public.ldc_act(text,text,text,jsonb),
-  public.ldc_rename(text,text,text), public.ldc_leave(text,text) to anon, authenticated;
+  public.ldc_rename(text,text,text), public.ldc_leave(text,text) from public, anon, authenticated;
+grant execute on function public.ldc_create_room(text,text), public.ldc_admin_rooms(text) to anon, authenticated;
+do $$
+begin
+  if to_regprocedure('public.ldc_account_room(text,text,text,jsonb)') is null then
+    grant execute on function public.ldc_join(text,text,text), public.ldc_act(text,text,text,jsonb),
+      public.ldc_rename(text,text,text), public.ldc_leave(text,text) to anon, authenticated;
+  end if;
+end $$;
 
 revoke all on function public._ldc_new_room(text), public._ldc_room_list() from public, anon, authenticated;
 revoke all on function public.ldc_bluff_control(text,text,text,text) from public;

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN" data-skin="oc">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>有内鬼，继续画！ · 来点刺激的</title>
+<link rel="icon" href="icons/icon-32.png">
+<link rel="stylesheet" href="style.css?v=22">
+<link rel="stylesheet" href="install-guide.css?v=1">
+<link rel="stylesheet" href="drawing.css?v=1">
+<script defer src="config.js?v=10"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<script defer src="account-core.js?v=2"></script>
+<script defer src="install-guide.js?v=1"></script>
+<script defer src="drawing.js?v=6"></script>
+</head>
+<body>
+<div class="app draw-app">
+  <header class="topbar">
+    <a id="draw-back" class="icon-btn" href="index.html">‹ 大厅</a>
+    <div class="grow"></div>
+    <a id="draw-profile" class="icon-btn player-profile-link" hidden><span class="player-profile-avatar" aria-hidden="true"></span>个人中心</a>
+    <button id="draw-share" class="icon-btn" hidden>邀请</button>
+    <button id="draw-rules" class="icon-btn">规则</button>
+  </header>
+  <main id="draw-page" class="screen" aria-label="有内鬼，继续画！"></main>
+</div>
+<dialog id="draw-dialog"></dialog>
+<p id="draw-notice" class="toast hide" role="status"></p>
+</body>
+</html>

@@ -2,6 +2,7 @@
 (() => {
 'use strict';
 const A = window.LdcApi;
+const Account = window.LdcAccount;
 const sound = window.LdcSound;
 const $ = s => document.querySelector(s);
 const app = $('#app'), overlay = $('#overlay'), toastEl = $('#toast');
@@ -35,8 +36,8 @@ const ERR = {
   undercover_people: '至少四位玩家进入谁是卧底才能开局',
   already_voted: '这次投票已经提交',
   warnings_pending: '请先发出剩余的警告牌',
-  bluff_waiting: '本轮暂停，等离开的玩家回来',
   bluff_settings_owner: '由当前负责设置的玩家操作',
+  account_required: '请先登录',
   busy: '已经有一个提议在等大家同意', not_ready: '这个游戏还在做，下一版上线', same: '已经在玩这个了', not_paused: '游戏没有暂停',
   bad_target: '现在不能跳过 TA', paused: '游戏暂停中', phase: '已经到下一步了', not_in_round: '正在同步本轮名单，请重试',
   already: '你已经摇过了', stale: '这个提议已经结束了', network: '网络不太好，再试一次', not_member: '你已经不在这个房间了',
@@ -44,7 +45,7 @@ const ERR = {
   not_yours: '现在不是你来操作', empty: '这个分类没有题了', bad_code: '房间号要 6 位数字', code_taken: '这个房间号已经有了',
   king_people: '至少两位玩家在线才能开始', king_numbers: '请选择有效的挑战号码', king_text: '命令要写 1 到 200 个字',
   king_offline: '有相关玩家离线，可以等 TA 回来或重新安排本轮',
-  need3: '至少 3 个人在线才能玩', finished: '预设的轮数已经玩完了', no_warns: '警告牌用完了', not_installed: '服务器还没装好', server: '服务器出错了，再试一次', no_game: '现在没有在玩游戏', bad_kind: '操作不对', bad_action: '操作不对'
+  need3: '至少 3 位玩家入座才能玩', finished: '预设的轮数已经玩完了', no_warns: '警告牌用完了', not_installed: '服务器还没装好', server: '服务器出错了，再试一次', no_game: '现在没有在玩游戏', bad_kind: '操作不对', bad_action: '操作不对'
 };
 const TTYPES = [{ id: 'truth', name: '真心话', hl: 'hl1' }, { id: 'dare', name: '大冒险', hl: 'hl2' }, { id: 'quiz', name: '智力问答', hl: 'hl3' }];
 const TCATS = {
@@ -80,12 +81,23 @@ const serverNow = () => Date.now() + S.offset;
 // 我现在在哪个游戏页面（null = 大厅）。每个人各走各的
 const myGame = () => ((st().where || {})[me()]) || null;
 const inGameIds = g => players().filter(p => p.online && (st().where || {})[p.id] === g).map(p => p.id);
+const gameSeatCount = g => players().filter(p => st().where?.[p.id] === g).length;
 // 打过字之后重新加载一次页面再进房间：清掉 iPhone「摇动以撤销」的撤销记录，摇骰子时就不会弹「撤销键入」
 function cleanEnter(code) {
   const u = new URL(location.href); u.hash = '';
   u.searchParams.set('r', code);
   try { (document.activeElement || {}).blur && document.activeElement.blur(); } catch (e) {}
   location.replace(u.toString());
+}
+function drawingLink(code) {
+  const link = new URL('drawing.html', location.href);
+  if (code) {
+    link.searchParams.set('r', code);
+    link.searchParams.set('from', code);
+    link.searchParams.set('lobby', '1');
+  }
+  if (A.MOCK) link.searchParams.set('mock', '1');
+  return esc(link.href);
 }
 function roomLink(code) {
   const u = new URL(location.href); u.search = ''; u.hash = '';
@@ -105,6 +117,8 @@ function setSkin(k) {
   const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = k === 'night' ? '#1E1033' : k === 'oc' ? '#F3F7FC' : '#FFEAF3';
 }
 const skinBtn = () => `<button class="icon-btn round" data-act="skin" aria-label="皮肤和音效设置" aria-haspopup="true"><span class="skin-dot"></span></button>`;
+const profileLink = () => !A.MOCK && Account.state.user
+  ? `<a class="icon-btn player-profile-link" href="${esc(Account.pageURL())}" title="${esc(Account.state.user.nickname)}"><span class="player-profile-avatar" aria-hidden="true">${esc([...Account.state.user.nickname][0])}</span>个人中心</a>` : '';
 const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
 const dieHTML = (v, cls = '') => `<div class="die ${cls}" id="die" role="img" aria-label="${v ? v + ' 点' : '骰子'}">${
   Array.from({ length: 9 }, (_, i) => `<span class="${PIPS[v || 6].includes(i) ? 'on' : ''}"></span>`).join('')}</div>`;
@@ -117,12 +131,12 @@ function setDieFace(v) {
 function homeHTML() {
   const admin = !!LS.get(ADMIN_KEY);
   return `
-  <div class="topbar"><div class="grow"></div>${skinBtn()}</div>
+  <div class="topbar">${profileLink()}<div class="grow"></div>${skinBtn()}</div>
   <main class="screen">
     <h1 class="home-title disp hl1 big grad ${S.flicked ? '' : 'flick'}">来点刺激的<span class="spark" style="right:-4px;top:-40px;font-size:30px" aria-hidden="true">✦</span><span class="spark" style="left:4px;bottom:-56px;font-size:18px" aria-hidden="true">✦</span></h1>
     <div class="home-sub disp">来都来了</div>
     <div class="push stack">
-      ${admin ? `<div class="row2" style="display:grid;grid-template-columns:1fr auto;gap:10px">
+      ${admin ? `<a class="link" href="account.html?admin=1">账号管理</a><div class="row2" style="display:grid;grid-template-columns:1fr auto;gap:10px">
         <button class="btn b3" data-act="admin-create">创建房间</button>
         <button class="btn b3" style="width:auto;padding:16px" data-act="admin-rooms">我建的</button></div>` : ''}
       <div class="room-cap" style="margin:0">房间号</div>
@@ -133,6 +147,8 @@ function homeHTML() {
       <div class="err" id="homeErr"></div>
       <button class="btn b1" data-act="join">加入</button>
     </div>
+    ${window.LdcInstallGuide.slot()}
+    <a class="g wide draw-home" href="${drawingLink()}"><span class="k hl3">画</span><h3>有内鬼，继续画！<small>一起画一笔，找出不知道题目的人</small></h3></a>
   </main>`;
 }
 function paintBoxes() {
@@ -195,12 +211,13 @@ function lobbyHTML() {
     <div class="room-no disp hl2 ${S.flicked ? '' : 'flick'}">${esc(S.code)}</div>
     <div class="share"><button class="chip" data-act="copy-link">复制链接</button><button class="chip" data-act="share">二维码</button></div>
     ${peopleHTML()}
+    ${window.LdcInstallGuide.slot()}
     <div class="push"></div>
     <div class="games">${GAMES.map(g => {
       const ready = A.GAMES_READY.includes(g.id);
       const n = inGameIds(g.id).length;
       return `<button class="g ${ready ? '' : 'soon'}" data-act="goto" data-game="${g.id}"><span class="k ${g.hl}">${g.k}</span><h3>${g.name}${!ready ? '<small>下一版</small>' : n ? `<small>${n} 人在玩</small>` : ''}</h3></button>`;
-    }).join('')}</div>
+    }).join('')}<a class="g draw-home" href="${drawingLink(S.code)}"><span class="k hl3">画</span><h3>有内鬼，继续画！</h3></a></div>
     <div class="foot"><button class="link" data-act="rename">改名字</button><button class="link" data-act="leave">离开房间</button></div>`;
 }
 function diceHTML() {
@@ -232,7 +249,7 @@ function diceHTML() {
     }).join('');
     const doneN = (d.done || []).length, all = (d.participants || []).length;
     return `
-      <div class="h-cap">第 ${d.round} 轮，${doneN}/${all} 已摇</div>
+      <div class="h-cap">第 ${d.round} 轮，${doneN}/${all} 已摇${d.roll_deadline ? ' · ' + countdown(d.roll_deadline) : ''}</div>
       <h1 class="h-title disp">摇一摇</h1>
       ${top}
       <div class="list" style="margin-top:14px">${rows}</div>
@@ -406,9 +423,7 @@ function kingHTML() {
 // ---------- 瞎掰王 ----------
 // ---------- 瞎掰王 ----------
 const BANKS = [['mix', '知识题'], ['story', '故事']];
-const BTHINK = [[30, '30 秒'], [60, '1 分钟'], [120, '2 分钟']];
 const BROUNDS = [[1, '单轮'], [3, '3 轮'], [5, '5 轮'], [8, '8 轮'], [0, '不限']];
-const bThink = b => ([30, 60, 120].includes(b.think) ? b.think : 30);
 const autoWarns = n => (n <= 4 ? 0 : n <= 8 ? 1 : 2);
 const ROLE_NAME = { smart: '大聪明', honest: '老实人', bluffer: '捣蛋鬼' };
 // 兼容正在玩的旧题，隐藏旧版写在题目末尾的领域标记。
@@ -429,8 +444,8 @@ function bluffRules(open, act) {
     </ul>
     <h2>回合流程</h2>
     <ol>
-      <li><strong>报名与分配身份。</strong>系统从自愿报名的玩家中随机选出大聪明。无人报名时，从本轮玩家中随机选出一人。随后分配老实人和捣蛋鬼。</li>
-      <li><strong>选题与准备。</strong>大聪明从候选题中选一道。知识题附有三个公开提示，其中一条符合题意，两条是干扰项。正确解释仅在准备阶段向老实人开放，揭晓时向全体玩家公布。故事题根据题面准备发言。</li>
+      <li><strong>报名与分配身份。</strong>系统从自愿报名的玩家中随机选出大聪明。无人报名时，从本轮玩家中随机选出一人。随后分配老实人和捣蛋鬼。在线玩家确认身份后进入选题，离线玩家保留本轮身份。</li>
+      <li><strong>选题与准备。</strong>大聪明从候选题中选一道。知识题附有三个公开提示，其中一条符合题意，两条是干扰项。选定题目后，老实人可随时查看正确解释，揭晓时向全体玩家公布。故事题根据题面准备发言。</li>
       <li><strong>线下讨论。</strong>玩家在线下自由发言。讨论结束后，由大聪明开始指认。</li>
       <li><strong>指认与揭晓。</strong>讨论结束且警告牌全部发出后，大聪明有一次机会指认老实人。确认后立即揭晓身份并结算本轮积分。</li>
     </ol>
@@ -460,7 +475,7 @@ function bluffRules(open, act) {
 }
 function roleTip(role, mode) {
   if (role === 'smart') return '不知道答案。选题、听发言、发警告牌，最后找出唯一的老实人';
-  if (role === 'honest') return mode === 'knowledge' ? '只有你能看到正确解释。准备时间里记住，开始发言后就看不到了；照真的说，不能编' : '讲一件真实发生过的事，不能编';
+  if (role === 'honest') return mode === 'knowledge' ? '选定题目后可以查看正确解释。讨论时请按真实含义说明。' : '讲一件真实发生过的事，不能编';
   if (role === 'bluffer') return mode === 'knowledge' ? '你看不到答案，现场编一个像真的解释' : '编一件没发生过、但听起来像真的事';
   return '正在同步身份';
 }
@@ -470,30 +485,73 @@ function bluffScores(b) {
   ids.sort((x, y) => sc[y] - sc[x]);
   return `<div class="h-cap" style="margin-top:18px">总分</div><div class="list">${ids.map(id => `<div class="row"><span class="who">${esc(pname(id))}${id === me() ? '（我）' : ''}</span><span class="n" style="font-size:26px;width:auto">${sc[id]}</span></div>`).join('')}</div>`;
 }
-function bluffMine(b) {
-  const my = me(), role = b.smart === my ? 'smart' : (b.roles || {})[my];
+const bluffRole = (b, id) => b?.smart === id ? 'smart' : b?.roles?.[id];
+function privateRoleCard(visible, badge, detail = '') {
+  const open = Boolean(S.roleOpen);
+  return `<section class="qcard bluff-word-card" aria-label="本轮卡片">
+    ${visible}
+    <button type="button" class="bluff-flip" data-act="flip-role" aria-expanded="${open}" aria-controls="private-role-detail">
+      <span class="bluff-flip-faces">
+        <span class="bluff-flip-face" aria-hidden="${open}">翻开身份</span>
+        <span class="bluff-flip-face bluff-flip-back" aria-hidden="${!open}">${badge}<small>翻回隐藏</small></span>
+      </span>
+    </button>
+    <div id="private-role-detail" ${open ? '' : 'hidden'}>${detail}</div>
+  </section>`;
+}
+function bluffCard(b) {
+  const role = bluffRole(b, me());
   const q = b.q || {};
-  let html = `<p class="mine-role"><span class="rtag r-${role || 'none'}">${role ? '你是' + ROLE_NAME[role] : '正在同步身份'}</span></p>`;
-  if (role === 'honest' && q.answer) html += `<div class="answer"><b>正确解释（只有你看得到）</b>${esc(q.answer)}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>`;
-  return html;
+  const visible = q.text ? `<div class="bluff-word">${qBody(q)}</div>` : '';
+  if (role === 'smart') return visible ? `<section class="qcard" aria-label="本轮题目">${visible}</section>` : '';
+  if (!role) return `<section class="qcard" aria-label="本轮卡片">${visible}<p class="note">正在同步身份</p></section>`;
+  const open = Boolean(S.roleOpen);
+  const answer = role === 'honest' && q.answer
+    ? `<div class="answer"><b>正确解释</b>${esc(q.answer)}${q.explain ? `<small>${esc(q.explain)}</small>` : ''}</div>` : '';
+  return `<section class="qcard bluff-word-card" aria-label="本轮卡片">
+    ${visible}
+    <button type="button" class="bluff-info-toggle" data-act="b-toggle-info" role="switch" aria-checked="${open}" aria-label="显示私密信息" aria-controls="bluff-private-info">
+      <span aria-hidden="true">隐藏</span><span aria-hidden="true">显示</span>
+    </button>
+    <div id="bluff-private-info" class="bluff-private-info" ${open ? '' : 'hidden'}>
+      <span class="rtag r-${role}">${ROLE_NAME[role]}</span>
+      ${answer}
+    </div>
+  </section>`;
+}
+function showPrivateRole(open) {
+  S.roleOpen = open;
+  const toggle = $('[data-act="b-toggle-info"]');
+  if (toggle) {
+    toggle.setAttribute('aria-checked', String(open));
+    $('#bluff-private-info').hidden = !open;
+    return;
+  }
+  const button = $('[data-act="flip-role"]');
+  if (!button) return;
+  button.setAttribute('aria-expanded', String(open));
+  button.querySelector('.bluff-flip-face').setAttribute('aria-hidden', String(open));
+  button.querySelector('.bluff-flip-back').setAttribute('aria-hidden', String(!open));
+  $('#private-role-detail').hidden = !open;
 }
 const roundText = b => `第 ${b.round}${b.rounds > 0 ? ' / ' + b.rounds : ''} 轮`;
 const warnTag = (b, id) => ((b.warned || []).includes(id) ? '<span class="wtag">警告</span>' : '');
-const bluffTimerText = b => b.away_clock?.key === 'timer_end'
-  ? timerText({ timer_left: b.away_clock.left }) : timerText(b);
+function countdown(deadline) {
+  if (typeof deadline !== 'number') return '';
+  return `<span data-countdown="${deadline}">${Math.max(0, Math.ceil((deadline - serverNow()) / 1000))}</span> 秒`;
+}
 
 function bluffHTML() {
   const b = st().bluff || {}, my = me();
   const inRound = (b.players || []).includes(my), isSmart = b.smart === my;
   const canSmart = isSmart;
-  const waiting = Boolean(b.away?.length);
   const youOr = id => id === my ? '你' : esc(pname(id));
   const links = (redraw) => `<div class="foot"><button class="link" data-act="b-rules-top">规则</button>${redraw ? '<button class="link" data-act="b-redraw">换题</button>' : ''}<button class="link" data-act="b-void">这轮作废</button></div>`;
   const rulesTop = S.bRulesTop ? bluffRules(true, 'b-rules-top') : '';
   const q = b.q || {};
 
   if (b.phase === 'setup') {
-    const on = inGameIds('bluff').length;
+    const on = gameSeatCount('bluff');
     const editor = b.settings_order?.[0];
     const canEdit = editor === my;
     const chips = (list, cur, act) => list.map(([v, n]) => `<button class="chip ${cur === v ? 'on' : ''}" aria-pressed="${cur === v}" data-act="${act}" data-v="${v}" ${canEdit ? '' : 'disabled'}>${n}</button>`).join('');
@@ -504,44 +562,43 @@ function bluffHTML() {
       ${bluffRules(S.bRules !== false, 'b-rules')}
       ${canEdit ? '' : `<p class="note">${editor ? `${esc(pname(editor))}正在设置，等 TA 开始游戏。` : '正在确认负责设置的玩家。'}</p>`}
       <div class="timer-row wrap"><span>题库</span>${chips(BANKS, b.bank === 'story' ? 'story' : 'mix', 'b-bank')}</div>
-      <div class="timer-row"><span>准备</span>${chips(BTHINK, bThink(b), 'b-think')}</div>
       <div class="timer-row"><span>警告牌</span>${chips([[1, '开'], [0, '关']], b.warn_on !== false ? 1 : 0, 'b-warnon')}</div>
       <div class="timer-row wrap"><span>轮数</span>${chips(BROUNDS, [0, 1, 3, 5, 8].includes(b.rounds) ? b.rounds : 5, 'b-rounds')}</div>
-      <p class="note" style="text-align:left">现在 ${on} 人在线：警告牌 ${wN} 张，指认 1 次</p>
+      <p class="note" style="text-align:left">已入座 ${on} 人：警告牌 ${wN} 张，指认 1 次</p>
       ${canEdit ? bluffScores(b) : ''}
       <div class="push stack">
-        ${on < 3 ? '<p class="note">至少 3 个人在线才能开始</p>' : ''}
+        ${on < 3 ? '<p class="note">至少 3 位玩家入座才能开始</p>' : ''}
         <button class="btn b1" data-act="b-start" ${!canEdit || on < 3 ? 'disabled' : ''}>开始游戏</button>
       </div>`;
   }
   if (b.phase === 'recruit') {
     const want = b.want || {};
-    const clock = waiting
-      ? (b.away_clock?.key === 'deadline' ? `${Math.ceil(b.away_clock.left / 1000)} 秒（暂停中）` : '报名暂停')
-      : `<span data-countdown="${b.deadline}">${Math.max(0, Math.ceil((b.deadline - serverNow()) / 1000))}</span> 秒`;
     const rows = (b.players || []).map(id => `<div class="row"><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}</span>
       <span class="st ${want[id] === true ? 'ok' : ''}">${want[id] === true ? '想当' : want[id] === false ? '不当' : '还没选'}</span></div>`).join('');
     return `
-      <div class="h-cap">${roundText(b)}，${clock}</div>
+      <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">谁当大聪明</h1>
       <p class="tip">大聪明不知道答案，负责选题、听发言、发警告牌，最后找出老实人。有人想当就从里面抽一个，没人想当就随机。</p>
       <div class="list">${rows}</div>
       <div class="push stack">${inRound ? `<div class="row2">
-        <button class="btn ${want[my] === true ? 'b1' : 'b3'}" data-act="b-want" data-yes="1" ${waiting ? 'disabled' : ''}>我想当</button>
-        <button class="btn ${want[my] === false ? 'b1' : 'b3'}" data-act="b-want" data-yes="0" ${waiting ? 'disabled' : ''}>这轮不当</button></div>` : '<p class="note">正在同步本轮名单</p>'}
-        ${waiting ? '<button class="link" data-act="b-restart">取消这次报名</button>' : ''}</div>`;
+        <button class="btn ${want[my] === true ? 'b1' : 'b3'}" data-act="b-want" data-yes="1">我想当</button>
+        <button class="btn ${want[my] === false ? 'b1' : 'b3'}" data-act="b-want" data-yes="0">这轮不当</button></div>` : '<p class="note">正在同步本轮名单</p>'}
+</div>`;
   }
   if (b.phase === 'roles') {
-    const role = isSmart ? 'smart' : (b.roles || {})[my];
+    const role = bluffRole(b, my);
     const seen = (b.seen || []).includes(my);
     return `
       ${rulesTop}
-      <div class="h-cap">${roundText(b)}，大聪明是${youOr(b.smart)}</div>
+      <div class="h-cap">${roundText(b)}${isSmart ? '' : '，大聪明是' + youOr(b.smart)}</div>
       <h1 class="h-title disp">你的身份</h1>
-      <div class="rolecard r-${role || 'none'}"><div class="disp">${role ? ROLE_NAME[role] : '正在发放身份'}</div><p>${roleTip(role, b.mode)}</p></div>
+      <div class="rolecard r-${role || 'none'}">
+        <div class="disp">${role ? ROLE_NAME[role] : '正在发放身份'}</div>
+        <p>${roleTip(role, b.mode)}</p>
+      </div>
       <p class="tip">大聪明的身份大家都知道；老实人和捣蛋鬼的身份保密，别说出来。本轮：警告牌 ${b.warns_left || 0} 张，指认 1 次。</p>
       <p class="note">${(b.seen || []).length}/${b.players.length} 已确认</p>
-      <div class="push stack">${inRound && !seen ? `<button class="btn b1" data-act="b-seen" ${waiting ? 'disabled' : ''}>我知道了</button>` : '<p class="note">等其他人确认</p>'}</div>
+      <div class="push stack">${inRound && !seen ? `<button class="btn b1" data-act="b-seen">我知道了</button>` : '<p class="note">等其他人确认</p>'}</div>
       ${links(false)}`;
   }
   if (b.phase === 'choose') {
@@ -556,8 +613,6 @@ function bluffHTML() {
       ${rulesTop}
       <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">${esc(pname(b.smart))}在选题</h1>
-      ${bluffMine(b)}
-      <p class="tip">${roleTip((b.roles || {})[my], b.mode)}</p>
       ${links(false)}`;
     return `
       ${rulesTop}
@@ -566,26 +621,20 @@ function bluffHTML() {
       <p class="tip">${b.mode === 'story' ? '选一道大家都能讲的题目。' : '题目和三个提示大家都能看到，只有老实人能看到解释。'}</p>
       <div class="choices">${ch.map(c => `<button class="qcard choice ${S.bChoice === c.id ? 'on' : ''}" data-act="b-choice" data-id="${esc(c.id)}">${qBody(c)}</button>`).join('')}</div>
       <div class="push stack" style="margin-top:14px">
-        <button class="btn b1" data-act="b-choose" ${waiting || !S.bChoice ? 'disabled' : ''}>${S.bChoice ? '就这道' : '先选一道'}</button>
-        ${ch.length > 1 ? `<button class="link" data-act="b-more" ${waiting ? 'disabled' : ''}>换两道</button>` : ''}
+        <button class="btn b1" data-act="b-choose" ${!S.bChoice ? 'disabled' : ''}>${S.bChoice ? '就这道' : '先选一道'}</button>
+        ${ch.length > 1 ? `<button class="link" data-act="b-more">换两道</button>` : ''}
       </div>
       ${links(false)}`;
   }
   if (b.phase === 'think') {
     const ready = (b.ready || []).includes(my);
-    const role = isSmart ? 'smart' : (b.roles || {})[my];
-    const tip = role === 'honest' ? (b.mode === 'knowledge' ? '<p class="tip warn">准备时间结束后就看不到解释了，现在记住。发言时照真的说，可以用自己的话。</p>' : '<p class="tip">想好要讲哪件真事。</p>')
-      : role === 'bluffer' ? `<p class="tip">${b.mode === 'knowledge' ? '想好怎么编：意思、来历、背后的故事、用在什么场合。' : '想好要编一件什么事，细节越具体越像真的。'}</p>`
-      : role === 'smart' ? '<p class="tip">发言时留意每个人给出的解释和细节。</p>' : '';
     return `
       ${rulesTop}
       <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">准备</h1>
-      <div class="qcard">${qBody(q)}<div class="timer" data-btimer>${bluffTimerText(b)}</div></div>
-      ${bluffMine(b)}
-      ${tip}
+      ${bluffCard(b)}
       <div class="push stack" style="margin-top:14px">
-        ${inRound && !ready ? `<button class="btn b1" data-act="b-ready" ${waiting ? 'disabled' : ''}>准备完成</button>` : `<p class="note">${(b.ready || []).length}/${b.players.length} 准备好了</p>`}
+        ${inRound && !ready ? `<button class="btn b1" data-act="b-ready">准备完成</button>` : `<p class="note">${(b.ready || []).length}/${b.players.length} 准备好了</p>`}
       </div>
       ${links(true)}`;
   }
@@ -603,33 +652,31 @@ function bluffHTML() {
       ${isSmart ? rulesTop : ''}
       <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">线下讨论</h1>
-      <div class="qcard">${qBody(q)}</div>
-      ${bluffMine(b)}
+      ${bluffCard(b)}
       ${isSmart ? `<div class="stack discussion-actions">
         ${rows ? `<section class="warning-roster stack" aria-label="警告牌">
           <div class="h-cap">警告牌 · 剩余 ${b.warns_left} 张</div>
           <div class="list">${rows}</div>
-          ${canWarn ? `<button class="btn b2" data-act="b-warn" ${waiting || !S.bWarn ? 'disabled' : ''}>${S.bWarn ? '给' + esc(pname(S.bWarn)) + '发警告牌' : '发警告牌'}</button>` : ''}
+          ${canWarn ? `<button class="btn b2" data-act="b-warn" ${!S.bWarn ? 'disabled' : ''}>${S.bWarn ? '给' + esc(pname(S.bWarn)) + '发警告牌' : '发警告牌'}</button>` : ''}
         </section>` : ''}
-        <button class="btn b1" data-act="b-discuss-done" ${waiting || b.warns_left > 0 ? 'disabled' : ''}>讨论结束，开始指认</button>
+        <button class="btn b1" data-act="b-discuss-done" ${b.warns_left > 0 ? 'disabled' : ''}>讨论结束，开始指认</button>
       </div>${links(true)}` : ''}`;
   }
   if (b.phase === 'guess') {
     if (!canSmart) return `
       <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">大聪明正在指认</h1>
-      <div class="qcard">${qBody(q)}</div>
-      ${bluffMine(b)}`;
+      ${bluffCard(b)}`;
     const cands = b.order || [];
     if (S.bPick && !cands.includes(S.bPick)) S.bPick = null;
     return `
       ${rulesTop}
       <div class="h-cap">${roundText(b)}</div>
       <h1 class="h-title disp">谁是老实人</h1>
-      <div class="qcard">${qBody(q)}</div>
+      ${bluffCard(b)}
       <p class="tip">只有 1 次机会，确认后立即揭晓。</p>
       <div class="cands">${cands.map(id => `<button class="cand ${S.bPick === id ? 'on' : ''}" data-act="b-cand" data-pid="${id}">${esc(pname(id))}${id === my ? '（我）' : ''}${warnTag(b, id)}</button>`).join('')}</div>
-      <div class="push stack"><button class="btn b1" data-act="b-pick" ${waiting || !S.bPick ? 'disabled' : ''}>${S.bPick ? `确定是${esc(pname(S.bPick))}` : '先选一个人'}</button><p class="note">确定后不能改</p></div>
+      <div class="push stack"><button class="btn b1" data-act="b-pick" ${!S.bPick ? 'disabled' : ''}>${S.bPick ? `确定是${esc(pname(S.bPick))}` : '先选一个人'}</button><p class="note">确定后不能改</p></div>
       ${links(false)}`;
   }
   if (b.phase === 'reveal') {
@@ -680,7 +727,8 @@ function bluffHTML() {
 function undercoverHTML() {
   const u = st().undercover || { phase: 'setup' };
   const online = inGameIds('undercover'), my = me();
-  const hasEnough = online.length >= 4;
+  const seated = gameSeatCount('undercover');
+  const hasEnough = seated >= 4;
   const whiteboardSetting = `<div class="timer-row"><span>白板</span>
     <button class="chip ${u.whiteboard_on ? '' : 'on'}" data-act="u-whiteboard" data-v="0" aria-pressed="${!u.whiteboard_on}">关闭</button>
     <button class="chip ${u.whiteboard_on ? 'on' : ''}" data-act="u-whiteboard" data-v="1" aria-pressed="${!!u.whiteboard_on}">1 位</button></div>`;
@@ -688,12 +736,12 @@ function undercoverHTML() {
     <h1 class="h-title disp">谁是卧底</h1>
     <details class="rules" open><summary class="rules-h">怎么玩</summary><div class="rules-b">
       <p>4–7 人有 1 名卧底，8 人及以上有 2 名。每个人只看到自己的词，只有卧底拿到不同的词。</p>
-      <p>线下描述词语，不能直接说出原词。说完后投票，得票最高的人出局。平票重投一次，再平票就回到讨论。</p>
+      <p>线下描述词语，不能直接说出原词。说完后投票，在线玩家全部提交后结算。得票最高的人出局。平票重投一次，再平票就回到讨论。</p>
       <p>找出所有卧底，平民获胜。场上卧底人数追平或超过平民时，卧底获胜。</p>
       <p>开启白板后，一位玩家抽到空白词卡。白板与卧底同阵营，胜负判定只比较平民和卧底的人数。</p>
     </div></details>
     ${whiteboardSetting}
-    <p class="note">${online.length} 人已进入</p>
+    <p class="note">${seated} 人已进入</p>
     <div class="push stack"><button class="btn b1" data-act="u-start" ${hasEnough ? '' : 'disabled'}>开始发词</button></div>`;
 
   const title = `<div class="h-cap">谁是卧底 · 第 ${u.round} 局</div>`;
@@ -714,11 +762,11 @@ function undercoverHTML() {
   const alive = u.alive.includes(my);
   const away = u.alive.filter(id => !online.includes(id));
   const canReset = away.length > 0 && online[0] === my;
-  const status = u.last_tied ? '再次平票，本次无人出局。' : u.last_out ? esc(pname(u.last_out)) + '已出局。' : '';
-  const privateCard = u.blank ? '<div class="qcard"><div class="h-cap">你的身份</div><p>白板</p><small>你本局没有词语。</small></div>'
+  const status = u.no_votes ? '无人投票，继续讨论。' : u.last_tied ? '再次平票，本次无人出局。' : u.last_out ? esc(pname(u.last_out)) + '已出局。' : '';
+  const privateCard = u.blank ? privateRoleCard('<p>本局没有词语</p>', '<span class="rtag">白板</span>')
     : u.word ? `<div class="qcard"><div class="h-cap">你的词语</div><p>${esc(u.word)}</p></div>` : '';
   const notice = `${status ? `<p class="note">${status}</p>` : ''}
-    ${away.length ? `<p class="note" role="status">有 ${away.length} 位在场玩家暂时离线，回来后可继续投票。</p>` : ''}`;
+    ${away.length ? `<p class="note" role="status">有 ${away.length} 位玩家暂时离线，投票继续。</p>` : ''}`;
   const recovery = canReset ? '<button class="link" data-act="u-reset">结束本局，回到设置</button>' : '';
   if (u.phase === 'discuss') return `${title}<h1 class="h-title disp">线下描述</h1>
     ${privateCard}${notice}
@@ -726,11 +774,15 @@ function undercoverHTML() {
       : '<p class="note">你已出局，可以留在房间看结果。</p>'}${recovery}</div>`;
 
   const voted = u.voted.includes(my);
+  const onlineVoters = u.alive.filter(id => online.includes(id));
   const targets = u.targets.filter(id => id !== my);
-  const choices = alive && !voted ? targets.map(id => `<button class="cand ${S.uChoice === id ? 'on' : ''}"
-    data-act="u-target" data-pid="${esc(id)}" aria-pressed="${S.uChoice === id}">${esc(pname(id))}</button>`).join('') : '';
+  const displayed = voted ? [my] : u.targets.includes(my) ? u.targets : [...u.targets, my];
+  const choices = alive ? displayed.map(id => id === my
+    ? `<button type="button" class="cand self" disabled>${esc(pname(my))}（我）</button>`
+    : `<button class="cand ${S.uChoice === id ? 'on' : ''}"
+      data-act="u-target" data-pid="${esc(id)}" aria-pressed="${S.uChoice === id}">${esc(pname(id))}</button>`).join('') : '';
   return `${title}<h1 class="h-title disp">${u.runoff ? '平票重投' : '投票'}</h1>${privateCard}${notice}
-    <p class="note">${u.voted.length}/${u.alive.length} 人已投票</p>
+    <p class="note">在线玩家 ${onlineVoters.filter(id => u.voted.includes(id)).length}/${onlineVoters.length} 已投票</p>
     ${choices ? `<div class="cands">${choices}</div>` : ''}
     <div class="push stack">${!alive ? '<p class="note">你已出局，等待投票结果。</p>' : voted ? '<p class="note">已投票，等待其他玩家。</p>'
       : `<button class="btn b1" data-act="u-vote" ${targets.includes(S.uChoice) ? '' : 'disabled'}>确认投票</button>`}${recovery}</div>`;
@@ -751,26 +803,26 @@ function werewolfRules() {
   return `<details class="rules" open><summary class="rules-h">怎么玩 · 7 人屠边局</summary><div class="rules-b">
     <p>每个身份各 1 人，共 5 名好人和 2 名狼人。</p>
     <table class="bluff-points"><thead><tr><th>身份</th><th>阵营</th><th>能力</th></tr></thead><tbody>${rows}</tbody></table>
-    <p><strong>夜间</strong>：守卫 → 狼队 → 预言家 → 女巫。两狼需选同一目标才会落刀。守护抵消狼刀，无法挡毒。同一人当晚既被守又被解药救，仍会出局。</p>
-    <p><strong>白天</strong>：公布出局名单，身份暂不公开。线下讨论，网页投票。平票只在最高票玩家中重投一次，再平票则无人出局并进入下一夜。</p>
+    <p><strong>夜间</strong>：守卫 → 狼队 → 预言家 → 女巫。两狼需选同一目标才会落刀。守护抵消狼刀，无法挡毒。同一人当晚既被守又被解药救，仍会出局。夜间每步限时 45 秒，超时视为跳过。</p>
+    <p><strong>白天</strong>：公布出局名单，身份暂不公开。线下讨论，网页投票，在线玩家全部提交后结算。平票只在最高票玩家中重投一次，再平票则无人出局并进入下一夜。</p>
     <p><strong>屠边</strong>：两狼全部出局，好人获胜。狼队仍有人存活时，唯一的平民出局，或四位神职全部出局，狼人获胜。先结算开枪或带人，再判断胜负。</p>
   </div></details>`;
 }
 
 function werewolfHTML() {
   const w = st().werewolf || { phase: 'setup' }, my = me();
-  const online = inGameIds('werewolf'), enough = online.length === 7;
+  const online = inGameIds('werewolf'), seated = gameSeatCount('werewolf'), enough = seated === 7;
   if (w.phase === 'setup') return `
     <h1 class="h-title disp">狼人杀 · 7 人</h1>${werewolfRules()}
-    <p class="note">当前 ${online.length} / 7 人</p>
+    <p class="note">当前 ${seated} / 7 人</p>
     <div class="push stack"><button class="btn b1" data-act="w-start" ${enough ? '' : 'disabled'}>开始发身份</button></div>`;
 
   const role = WEREWOLF_ROLES[w.role];
   const alive = w.alive.includes(my);
   const away = w.alive.filter(id => !online.includes(id));
-  const own = role ? `<div class="qcard"><div class="h-cap">你的身份 · ${role[1]}阵营</div><p>${role[0]}</p><small>${role[2]}</small></div>` : '';
+  const own = role ? privateRoleCard('', `<span class="rtag">${role[0]}</span>`, `<p class="tip">${role[1]}阵营。${role[2]}</p>`) : '';
   const dead = w.last_dead || [];
-  const update = w.last_event === 'tie' ? '再次平票，无人出局。' : dead.length ? esc(names(dead)) + '出局。'
+  const update = w.last_event === 'no_votes' ? '无人投票，无人出局。' : w.last_event === 'tie' ? '再次平票，无人出局。' : dead.length ? esc(names(dead)) + '出局。'
     : w.last_event === 'dawn' ? '昨夜无人出局。' : '';
   const head = `<div class="h-cap">狼人杀 · 第 ${w.game_no} 局</div>`;
   if (w.phase === 'result') return `${head}<h1 class="h-title disp">${w.winner === 'good' ? '好人获胜' : '狼人获胜'}</h1>
@@ -785,7 +837,7 @@ function werewolfHTML() {
   const pass = (action, text = '跳过') => `<button class="link" data-act="${action}" data-mode="pass">${text}</button>`;
   const awayShooter = w.phase === 'shot' && !online.includes(w.shooter);
   const status = `${update ? `<p class="note">${update}</p>` : ''}${away.length || awayShooter ?
-    '<p class="note" role="status">有玩家暂时离线，回来后可继续。</p>' : ''}`;
+    '<p class="note" role="status">有玩家暂时离线，计时继续。</p>' : ''}`;
   const reset = (away.length || awayShooter) && online[0] === my ? '<button class="link" data-act="w-reset">结束本局</button>' : '';
   let title = '', body = '';
   if (w.phase === 'night') {
@@ -810,7 +862,8 @@ function werewolfHTML() {
     body = alive ? '<button class="btn b1" data-act="w-open-vote">讨论结束，开始投票</button>' : '<p class="note">你已出局。</p>';
   } else if (w.phase === 'vote') {
     title = w.runoff ? '平票重投' : '放逐投票';
-    body = `<p class="note">${w.voted.length} / ${w.alive.length} 人已投票</p>${!alive ? '<p class="note">你已出局。</p>' :
+    const onlineVoters = w.alive.filter(id => online.includes(id));
+    body = `<p class="note">在线玩家 ${onlineVoters.filter(id => w.voted.includes(id)).length}/${onlineVoters.length} 已投票</p>${!alive ? '<p class="note">你已出局。</p>' :
       w.voted.includes(my) ? '<p class="note">已投票，等待其他玩家。</p>' : targets(w.targets.filter(id => id !== my),'w-vote')}`;
   } else if (w.phase === 'shot') {
     title = '出局技能';
@@ -818,7 +871,7 @@ function werewolfHTML() {
       : '<p class="note">等待出局玩家处理技能。</p>';
   }
   const checked = w.checks?.length ? `<div class="list">${w.checks.map(q => `<div class="row"><span class="who">${esc(pname(q.player))}</span><span>${q.wolf ? '狼人' : '好人'}</span></div>`).join('')}</div>` : '';
-  return `${head}<h1 class="h-title disp">${title}</h1>${own}${status}${checked}
+  return `${head}<h1 class="h-title disp">${title}</h1>${own}${status}${w.phase !== 'vote' && w.action_deadline ? `<p class="note">${countdown(w.action_deadline)}</p>` : ''}${checked}
     ${w.team ? `<p class="note">狼队 · ${esc(names(w.team))}</p>` : ''}
     <div class="push stack">${body}${reset}</div>`;
 }
@@ -837,11 +890,11 @@ function roomHTML() {
     <div class="grow"></div>
     ${canPause ? '<button class="icon-btn" data-act="pause">暂停</button>' : ''}
     ${inGame ? '<button class="icon-btn" data-act="share">邀请</button>' : ''}
-    ${skinBtn()}
+    ${profileLink()}${skinBtn()}
   </div>
   ${S.offline ? '<div class="offline-bar">网络断了，正在重连…</div>' : ''}
   ${inviteHTML()}
-  <main class="screen">${away ? '<p class="note" role="status">有玩家暂时离线，本轮进度已保留。</p>' : ''}${body}</main>
+  <main class="screen">${g === 'truth' && S.drawPenalty ? `<p class="note">接受绘画惩罚：${esc(S.drawPenalty)}</p>` : ''}${away ? '<p class="note" role="status">有玩家暂时离线，本轮继续。</p>' : ''}${body}</main>
   ${pausedHere ? `<div class="paused"><div class="card">
       <h2 class="disp">暂停中</h2>
       <p class="note" style="margin:0">${esc(pname(s.paused_by))}暂停了</p>
@@ -937,8 +990,14 @@ function setData(d) {
   const previousVote = S.data?.state.undercover;
   const nextVote = d.state.undercover;
   if (previousVote?.round !== nextVote?.round || previousVote?.ballot !== nextVote?.ballot) S.uChoice = null;
-  S.data = d;
   const bluff = d.state.bluff;
+  const previousBluff = S.data?.state.bluff;
+  const previousWolf = S.data?.state.werewolf;
+  if (first || d.me !== S.data.me || myGame() !== (d.state.where?.[d.me] || null) ||
+      bluff?.round !== previousBluff?.round || bluff?.phase !== previousBluff?.phase ||
+      bluffRole(bluff, d.me) !== bluffRole(previousBluff, d.me) ||
+      previousWolf?.game_no !== d.state.werewolf?.game_no || previousVote?.round !== nextVote?.round) S.roleOpen = false;
+  S.data = d;
   const night = myGame() === 'bluff' && bluff?.smart === d.me &&
     ['roles', 'think'].includes(bluff.phase) && !bluff.away?.length &&
     !(d.state.paused && d.state.paused_game === 'bluff');
@@ -984,6 +1043,7 @@ async function refresh() {
   if (r && r.error === 'network') { sound.setNight(false); if (!S.offline) { S.offline = true; render(); } return; }
   if (S.offline) { S.offline = false; S.sig = ''; }
   if (r && r.error === 'not_member') {
+    if (!A.MOCK) { stopRoom(); await enterRoom(code); return; }
     const saved = LS.get(tokKey(code));
     if (saved && saved !== token) {
       S.token = saved;
@@ -1009,6 +1069,15 @@ async function act(action, args, quiet) {
   return r;
 }
 function startRoom() {
+  const link = new URL(location.href);
+  if (link.searchParams.get('game') === 'truth') {
+    S.drawPenalty = (link.searchParams.get('penalty') || '').slice(0, 140);
+    link.searchParams.delete('game');
+    link.searchParams.delete('penalty');
+    history.replaceState(null, '', link);
+    if (myGame() !== 'truth') act('goto', { game: 'truth' });
+    else { S.sig = ''; render(); }
+  }
   stopRoom();
   unsub = A.subscribe(S.code, () => { clearTimeout(bumpTimer); bumpTimer = setTimeout(refresh, 120); });
   pollTimer = setInterval(() => { if (!document.hidden) refresh(); }, 3000);
@@ -1030,26 +1099,27 @@ function tick() {
   if (t) document.querySelectorAll('[data-timer]').forEach(el => {
     const txt = timerText(t); el.textContent = txt; el.classList.toggle('up', txt === '时间到');
   });
-  const bl = st().bluff;
-  // 准备时间到：向服务器同步讨论状态
-  if (bl?.phase === 'think' && typeof bl.timer_end === 'number' && serverNow() - bl.timer_end > 300 && Date.now() - (S.bTimeup || 0) > 2500) { S.bTimeup = Date.now(); refresh(); }
-  if (bl) document.querySelectorAll('[data-btimer]').forEach(el => {
-    const txt = bluffTimerText(bl); el.textContent = txt; el.classList.toggle('up', txt === '时间到');
-  });
+
 }
 
 // ---------- 页面跳转 ----------
 function goHome(err) {
   sound.setNight(false);
-  stopRoom(); S.view = 'home'; S.code = null; S.data = null; S.sig = ''; S.sheet = null;
+  stopRoom(); S.view = 'home'; S.drawPenalty = null; S.code = null; S.data = null; S.sig = ''; S.sheet = null;
   const u = new URL(location.href); u.searchParams.delete('r'); history.replaceState(null, '', u);
   render();
   if (err) { const e = $('#homeErr'); if (e) e.textContent = err; }
 }
 async function enterRoom(code) {
   sound.setNight(false);
-  S.code = code; S.data = null; S.sig = ''; S.lastNotice = null; S.sheet = null;
+  S.code = code; S.drawPenalty = null; S.data = null; S.sig = ''; S.lastNotice = null; S.sheet = null;
   const u = new URL(location.href); u.searchParams.set('r', code); history.replaceState(null, '', u);
+  if (!A.MOCK) {
+    const r = await A.join(code);
+    if (r.ok) { S.token = r.token; setData(r); startRoom(); }
+    else if (r.error !== 'account_required') goHome(ERR[r.error] || '暂时无法进入房间');
+    return;
+  }
   const tok = LS.get(tokKey(code));
   if (tok) {
     const r = await A.join(code, '', tok);
@@ -1301,10 +1371,11 @@ async function handle(a, ds = {}, el) {
         break;
       }
       case 'u-reset': if (window.confirm('结束本局并回到设置？')) await act('u_reset'); break;
+      case 'b-toggle-info':
+      case 'flip-role': showPrivateRole(!S.roleOpen); break;
       case 'b-bank': await act('b_setup', { bank: ds.v }); break;
       case 'b-warnon': await act('b_setup', { warn_on: ds.v === '1' }); break;
       case 'b-rounds': await act('b_setup', { rounds: +ds.v }); break;
-      case 'b-think': await act('b_think', { secs: +ds.v }); break;
       case 'b-rules': S.bRules = S.bRules === false; S.sig = ''; render(); break;
       case 'b-rules-top': S.bRulesTop = !S.bRulesTop; S.sig = ''; render(); if (S.bRulesTop) window.scrollTo(0, 0); break;
       case 'b-warn-pick': S.bWarn = S.bWarn === ds.pid ? null : ds.pid; S.sig = ''; render(); break;
@@ -1325,7 +1396,9 @@ async function handle(a, ds = {}, el) {
       case 'b-redraw': await act('propose', { kind: 'bluff_redraw' }); break;
       case 'b-void': await act('propose', { kind: 'bluff_void' }); break;
       case 'b-restart': await act('propose', { kind: 'restart_round' }); break;
-      case 'rename': S.sheet = { type: 'rename' }; renderOverlay(); setTimeout(() => { const i = $('#renameInput'); if (i) i.focus(); }, 50); break;
+      case 'rename':
+        if (!A.MOCK) { location.href = Account.pageURL(); break; }
+        S.sheet = { type: 'rename' }; renderOverlay(); setTimeout(() => { const i = $('#renameInput'); if (i) i.focus(); }, 50); break;
       case 'rename-save': {
         const n = ($('#renameInput').value || '').trim();
         const r = await A.rename(S.code, S.token, n);
@@ -1362,7 +1435,15 @@ window.addEventListener('resize', fitViewport);
 document.addEventListener('focusin', e => { if (e.target.tagName === 'INPUT') setTimeout(fitViewport, 250); });
 document.addEventListener('focusout', () => setTimeout(() => { if (!document.activeElement || document.activeElement.tagName !== 'INPUT') { document.body.classList.remove('kb'); document.documentElement.style.removeProperty('--vvh'); } }, 100));
 
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) showPrivateRole(false);
+  else refresh();
+});
+window.addEventListener('pageshow', e => {
+  if (!e.persisted) return;
+  showPrivateRole(false);
+  refresh();
+});
 window.addEventListener('online', refresh);
 
 // ---------- 启动 ----------
@@ -1375,8 +1456,12 @@ function readAdminHash() {
   return true;
 }
 window.addEventListener('hashchange', () => { if (readAdminHash() && S.view === 'home') render(); });
-(function boot() {
+(async function boot() {
   readAdminHash();
+  if (!A.MOCK) {
+    const identity = await Account.load();
+    if (!identity.ok) { Account.requireLogin(); return; }
+  }
   initMotion();
   const r = Q.get('r');
   if (r && /^\d{6}$/.test(r)) enterRoom(r);

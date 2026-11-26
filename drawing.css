@@ -1,0 +1,41 @@
+.draw-app a,.draw-home a{text-decoration:none;color:inherit}
+a.draw-home{text-decoration:none;color:inherit}
+.draw-home.wide{margin-top:16px}
+.draw-home small{color:var(--muted)}
+.draw-app .screen{gap:12px}
+.draw-kicker{color:var(--muted);font-size:13px;font-weight:700}
+.draw-title{margin:0 0 4px;overflow-wrap:anywhere}
+.draw-form{display:grid;gap:12px}
+.draw-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.draw-form label{display:grid;gap:4px;font-size:13px;font-weight:700;color:var(--muted)}
+.draw-form input,.draw-form select,#draw-dialog input,#draw-dialog select{min-width:0;width:100%;padding:10px;border:1px solid var(--line);border-radius:10px;
+  background:var(--surface-solid);color:var(--ink);font:inherit;font-size:16px}
+.draw-form input{min-height:45px}
+.draw-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.draw-actions .btn{flex:1 1 130px}
+.draw-roster{display:grid;gap:5px}
+.draw-roster .row{min-height:43px}
+.draw-roster .chip[disabled]{opacity:.65}
+.draw-color{display:inline-block;width:12px;height:12px;border-radius:50%;background:var(--player-color);flex:none}
+.draw-board{display:block;width:min(100%,490px);aspect-ratio:1;margin-inline:auto;background:#fffdf8;border-radius:16px;border:2px solid var(--line);box-shadow:var(--shadow)}
+.draw-board[data-writable="true"]{touch-action:none;cursor:crosshair;user-select:none;-webkit-user-select:none;overscroll-behavior:contain}
+.draw-topic{background:var(--well);border:1px solid var(--line);border-radius:12px;padding:10px 14px}
+.draw-topic p,.draw-topic summary{margin:0}
+.draw-topic summary{cursor:pointer}
+.draw-timer{font-variant-numeric:tabular-nums;color:var(--a1);font-weight:800}
+.draw-board-note{margin:0;text-align:center;min-height:22px}
+.draw-app .row{gap:8px}
+.draw-app .row .who{overflow-wrap:anywhere}
+.draw-app .row .st{white-space:nowrap}
+#draw-dialog{z-index:20;color:var(--ink);background:var(--surface-solid);width:min(92vw,440px);max-height:85vh;
+  padding:22px;border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow)}
+#draw-dialog::backdrop{background:#100a1cab}
+#draw-dialog h2{margin:0 0 14px}
+#draw-dialog p{line-height:1.55}
+#draw-dialog .qr{margin:14px auto;width:min(70%,245px);background:white;padding:12px}
+#draw-dialog .qr svg{display:block;width:100%;height:auto}
+#draw-dialog .url{overflow-wrap:anywhere}
+.draw-history{padding:8px 0}
+.draw-history summary{cursor:pointer}
+.draw-history .row{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.draw-app .row[data-draw="pick"][aria-pressed="true"]{outline:2px solid var(--a2);outline-offset:-2px}

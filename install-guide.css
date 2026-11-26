@@ -1,0 +1,22 @@
+.install-guide-tip{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px;
+  margin:12px 0;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+.install-guide-tip strong,.install-guide-tip small{display:block}
+.install-guide-tip strong{font-size:14px}
+.install-guide-tip small{color:var(--muted);font-size:12px;margin-top:2px}
+.install-guide-actions{display:flex;align-items:center;gap:8px}
+.install-guide-short{text-align:center;margin:8px 0}
+.install-guide-dialog{box-sizing:border-box;position:fixed;inset:0;margin:auto;width:min(calc(100vw - 32px),440px);max-height:85vh;
+  padding:22px;border:1px solid var(--line);border-radius:20px;background:var(--surface-solid);
+  color:var(--ink);box-shadow:var(--shadow)}
+.install-guide-dialog::backdrop{background:#100a1cb0}
+.install-guide-dialog h2{margin:0 0 8px;font-size:22px}
+.install-guide-destination{margin:0 0 15px;color:var(--muted);font-size:14px}
+.install-guide-dialog ol{margin:12px 0 18px;padding-inline-start:24px}
+.install-guide-dialog li{padding-inline-start:3px;line-height:1.55}
+.install-guide-dialog li+li{margin-top:9px}
+.install-guide-dialog details{margin:12px 0 16px}
+.install-guide-dialog summary{cursor:pointer}
+.install-guide-browser p{margin:0 0 8px;line-height:1.5}
+.install-guide-browser input{width:100%;box-sizing:border-box;margin-top:6px;padding:8px;border:1px solid var(--line);
+  border-radius:10px;background:var(--well);color:var(--ink);font-size:16px}
+.install-guide-copy-status:not(:empty){margin-top:6px;color:var(--muted);font-size:13px}
