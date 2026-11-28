@@ -26,3 +26,6 @@
 !account.js
 !install-guide.js
 !install-guide.css
+!motion.js
+!vendor/
+!vendor/gsap.min.js

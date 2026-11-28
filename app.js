@@ -69,6 +69,7 @@ let unsub = null, pollTimer = null, tickTimer = null, inflight = false, bumpTime
 let toastTimer = null;
 function toast(msg) {
   toastEl.textContent = msg; toastEl.classList.remove('hide');
+  if (window.LdcMotion) LdcMotion.toast(toastEl);
   clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.add('hide'), 2600);
 }
 const me = () => S.data && S.data.me;
@@ -154,6 +155,7 @@ function paintBoxes() {
   const v = ($('#codeInput') || {}).value || '';
   const bs = document.querySelectorAll('#boxes b');
   bs.forEach((b, i) => { b.textContent = v[i] || ''; b.classList.toggle('cur', i === Math.min(v.length, 5) && document.activeElement === $('#codeInput')); });
+  if (window.LdcMotion) LdcMotion.typed([...bs], v.length);
 }
 
 // ---------- 输名字 ----------
@@ -201,7 +203,7 @@ function inviteHTML() {
     <button class="yes" data-act="goto" data-game="${inv.game}">去看看</button><button class="no" data-act="invite-dismiss" data-at="${inv.at}">忽略</button></div>`;
 }
 function peopleHTML() {
-  return `<div class="people">${players().map(p => `<span class="p ${p.online ? '' : 'off'} ${p.id === me() ? 'me' : ''}">
+  return `<div class="people">${players().map(p => `<span class="p ${p.online ? '' : 'off'} ${p.id === me() ? 'me' : ''}" data-pid="${esc(p.id)}">
     <i class="av${p.seat % 3}">${esc([...p.name][0] || '?')}</i>${esc(p.name)}${p.id === me() ? '<em>我</em>' : ''}</span>`).join('')}</div>`;
 }
 function lobbyHTML() {
@@ -243,7 +245,7 @@ function diceHTML() {
     const rows = (d.participants || []).map(id => {
       const ok = (d.done || []).includes(id);
       const p = players().find(x => x.id === id);
-      return `<div class="row"><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}${p && !p.online ? '<span class="st">（离线）</span>' : ''}</span>
+      return `<div class="row" data-pid="${esc(id)}"><span class="who">${esc(pname(id))}${id === my ? '（我）' : ''}${p && !p.online ? '<span class="st">（离线）</span>' : ''}</span>
         ${ok ? '<span class="st ok">已摇</span>' : `<span class="st">还没摇</span>${id !== my ? `<button class="mini" data-act="skip" data-pid="${id}">跳过</button>` : ''}`}</div>`;
     }).join('');
     const doneN = (d.done || []).length, all = (d.participants || []).length;
@@ -363,6 +365,7 @@ function truthHTML() {
 }
 
 const isKingSelf = k => k && k.king === me();
+const CROWN = '<span class="crown" aria-hidden="true"><svg viewBox="0 0 64 44"><path d="M2 12l14 11L32 3l16 20 14-11-5 30H7z" fill="currentColor"/><circle cx="2" cy="12" r="3" fill="currentColor"/><circle cx="32" cy="3" r="3" fill="currentColor"/><circle cx="62" cy="12" r="3" fill="currentColor"/></svg></span>';
 function kingHTML() {
   const k = st().king;
   if (!k) return '';
@@ -381,11 +384,11 @@ function kingHTML() {
   const isKing = k.king === me();
   const myNumber = k.numbers[me()];
   const numbers = k.mode === 'public'
-    ? `<div class="chips">${Object.entries(k.numbers).sort((a, b) => a[1] - b[1])
+    ? `<div class="chips king-numbers">${Object.entries(k.numbers).sort((a, b) => a[1] - b[1])
         .map(([id, n]) => `<span class="chip">${n}号 ${esc(pname(id))}</span>`).join('')}</div>`
-    : myNumber ? `<p class="note">只有你能看到自己的编号：${myNumber}号</p>` : '';
+    : myNumber ? `<p class="note">只有你能看到自己的编号：<b class="my-num">${myNumber}号</b></p>` : '';
   const head = `<div class="h-cap">国王游戏，第 ${k.round} 轮</div>
-    <h1 class="h-title disp">${isKing ? '你是国王' : `${esc(pname(k.king))}是国王`}</h1>${numbers}`;
+    <h1 class="h-title disp king-title">${CROWN}${isKing ? '你是国王' : `${esc(pname(k.king))}是国王`}</h1>${numbers}`;
   const restart = '<button class="link" data-act="k-restart">重新指定国王</button>';
   if (k.phase === 'command') {
     const draft = S.kingDraft;
@@ -941,7 +944,7 @@ function menuHTML() {
     <i style="background:${k === 'night' ? 'linear-gradient(135deg,#FF4FA3 50%,#3EE6E0 50%)' : k === 'oc' ? 'linear-gradient(135deg,#FF9A3C 50%,#104E8B 50%)' : 'linear-gradient(135deg,#FFCEE3 0 33%,#678EC9 33% 66%,#262277 66%)'}"></i>${n}</button>`).join('')}
     <button class="sound-toggle" role="menuitemcheckbox" aria-checked="${sound.enabled}" data-act="sound-toggle">音效 <span>${sound.enabled ? '开' : '关'}</span></button></div>`;
 }
-function renderOverlay() { overlay.innerHTML = sheetHTML() + menuHTML(); }
+function renderOverlay() { overlay.innerHTML = sheetHTML() + menuHTML(); if (window.LdcMotion) LdcMotion.overlayRun(S, overlay); }
 
 // ---------- 渲染 ----------
 function render() {
@@ -949,6 +952,7 @@ function render() {
   const kingFocused = document.activeElement?.id === 'kingText';
   const kingSelection = kingFocused ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
   app.innerHTML = S.view === 'home' ? homeHTML() : S.view === 'name' ? nameHTML() : S.view === 'room' ? roomHTML() : '';
+  if (window.LdcMotion) LdcMotion.run(S, app);
   if (S.view === 'home') { const i = $('#codeInput'); if (i) { i.value = keepCode; paintBoxes(); } }
   if (kingSelection && $('#kingText')) { $('#kingText').focus(); $('#kingText').setSelectionRange(...kingSelection); }
   S.flicked = true;
@@ -1090,13 +1094,17 @@ function tick() {
   let expired = false;
   document.querySelectorAll('[data-countdown]').forEach(el => {
     const left = +el.dataset.countdown - serverNow();
-    el.textContent = Math.max(0, Math.ceil(left / 1000));
+    const sec = String(Math.max(0, Math.ceil(left / 1000)));
+    if (sec !== el.textContent && +sec > 0 && +sec <= 5 && window.LdcMotion) LdcMotion.pulse(el);
+    el.textContent = sec;
     if (left < -300) expired = true;
   });
   if (expired) refresh();
   const t = st().truth;
   if (t) document.querySelectorAll('[data-timer]').forEach(el => {
-    const txt = timerText(t); el.textContent = txt; el.classList.toggle('up', txt === '时间到');
+    const txt = timerText(t);
+    if (txt === '时间到' && el.textContent && el.textContent !== txt && window.LdcMotion) LdcMotion.shake(el);
+    el.textContent = txt; el.classList.toggle('up', txt === '时间到');
   });
 
 }
@@ -1468,4 +1476,5 @@ window.addEventListener('hashchange', () => { if (readAdminHash() && S.view === 
 })();
 
 window.LdcApp = { S, handle, refresh, render, askMotion, setMotion };
+if (window.LdcMotion) LdcMotion.init({ pname });
 })();

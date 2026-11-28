@@ -360,3 +360,25 @@ textarea.king-field{resize:vertical}
   .topbar:has(.player-profile-link) .icon-btn{padding-inline:8px}
   .player-profile-avatar{display:none}
 }
+
+/* ---------- 动画（motion.js） ---------- */
+[data-countdown]{display:inline-block}
+.king-title .crown{display:inline-block;width:.8em;height:.56em;margin-right:.16em;vertical-align:.02em;color:var(--a3)}
+.king-title .crown svg{display:block;width:100%;height:100%}
+[data-skin="night"] .king-title .crown{filter:drop-shadow(0 0 8px #ffd25aaa)}
+[data-skin="oc"] .king-title .crown{color:#FF9A3C}
+[data-skin="sakura"] .king-title .crown{color:#e48fb5}
+.my-num{display:inline-block;font-family:var(--disp);font-weight:var(--disp-w);color:var(--a2);font-size:1.3em;vertical-align:-.08em}
+[data-skin="sakura"] .my-num{color:#678EC9}
+.fx-glow{border-radius:10px}
+.timer[data-timer]{display:inline-block}
+#fx{position:fixed;inset:0;pointer-events:none;z-index:60}
+.fx-out{position:absolute;inset:0;display:grid;place-items:center;padding:24px}
+.fx-out-card{position:relative;background:var(--surface-solid);color:var(--ink);border:1.5px solid var(--a1);border-radius:20px;padding:20px 34px;text-align:center;box-shadow:0 20px 50px #0005;max-width:100%}
+[data-skin="night"] .fx-out-card{background:#2B1748;box-shadow:0 0 34px #ff4fa355}
+.fx-out-card b{display:inline-block;position:relative;font-family:var(--disp);font-weight:var(--disp-w);font-size:40px;line-height:1.2}
+.fx-out-card i{position:absolute;left:-6px;right:-6px;top:52%;height:3px;border-radius:2px;background:var(--a1);transform:scaleX(0);transform-origin:left center}
+.fx-out-card small{display:block;margin-top:6px;font-size:14px;color:var(--muted);letter-spacing:.3em;padding-left:.3em}
+.fx-night{position:absolute;inset:0;background:#07040f;display:grid;place-items:center;align-content:center;gap:18px;opacity:0}
+.fx-night svg{width:84px;height:84px}
+.fx-night p{color:#e8e3ff;font-family:var(--disp);font-weight:var(--disp-w);font-size:26px;letter-spacing:.2em;padding:0 16px;text-align:center}
