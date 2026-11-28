@@ -148,7 +148,6 @@ function homeHTML() {
       <button class="btn b1" data-act="join">加入</button>
     </div>
     ${window.LdcInstallGuide.slot()}
-    <a class="g wide draw-home" href="${drawingLink()}"><span class="k hl3">画</span><h3>有内鬼，继续画！<small>一起画一笔，找出不知道题目的人</small></h3></a>
   </main>`;
 }
 function paintBoxes() {
